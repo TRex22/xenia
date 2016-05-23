@@ -9,11 +9,14 @@
 
 #include "xenia/cpu/backend/backend.h"
 
+#include <cstring>
+
 namespace xe {
 namespace cpu {
 namespace backend {
 
-Backend::Backend(Processor* processor) : processor_(processor) {
+Backend::Backend(Processor* processor)
+    : processor_(processor), code_cache_(nullptr) {
   std::memset(&machine_info_, 0, sizeof(machine_info_));
 }
 

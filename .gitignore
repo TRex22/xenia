@@ -15,6 +15,8 @@ Desktop.ini
 # Projects/IDE files
 # ==============================================================================
 
+*~
+
 # Sublime Text
 *.sublime-project
 *.sublime-workspace
@@ -51,6 +53,7 @@ obj/
 *.py[co]
 .coverage
 *.o
+*.aps
 
 # ==============================================================================
 # Logs and dumps
@@ -60,6 +63,7 @@ npm-debug.log
 private/
 *.trace
 imgui.ini
+*.log
 
 # ==============================================================================
 # Build system output
@@ -72,27 +76,20 @@ node_modules/**/build/
 node_modules/.bin/
 
 # coverage/etc
-scratch/
+/scratch/
 
-.anvil-cache
-.build-cache/
-build/bin/
-build/obj/
-build-out/
-build-gen/
-build-bin/
-build-test/
+/build/
 
 # ==============================================================================
 # Local-only paths
 # ==============================================================================
 
 .vagrant
-attic/
-content/
-third_party/binutils/binutils-2.24.tar.gz
-third_party/binutils/bin/
-third_party/binutils/powerpc-none-elf/
-third_party/binutils/share/
-third_party/binutils/binutils*
-third_party/vasm/
+/attic/
+/content/
+/third_party/binutils/binutils-2.24.tar.gz
+/third_party/binutils/bin/
+/third_party/binutils/powerpc-none-elf/
+/third_party/binutils/share/
+/third_party/binutils/binutils*
+/third_party/vasm/

@@ -11,221 +11,88 @@
 #define XENIA_APU_AUDIO_SYSTEM_H_
 
 #include <atomic>
-#include <mutex>
 #include <queue>
 
-#include "xenia/emulator.h"
+#include "xenia/base/mutex.h"
+#include "xenia/base/threading.h"
+#include "xenia/cpu/processor.h"
+#include "xenia/kernel/xthread.h"
+#include "xenia/memory.h"
 #include "xenia/xbox.h"
-
-namespace xe {
-namespace kernel {
-class XHostThread;
-}  // namespace kernel
-}  // namespace xe
 
 namespace xe {
 namespace apu {
 
 class AudioDriver;
-class AudioDecoder;
-
-// This is stored in guest space in big-endian order.
-// We load and swap the whole thing to splat here so that we can
-// use bitfields.
-// This could be important:
-// http://www.fmod.org/questions/question/forum-15859
-// Appears to be dumped in order (for the most part)
-
-// http://pastebin.com/9amqJ2kQ
-struct XMAContextData {
-  static const uint32_t kSize = 64;
-  static const uint32_t kBytesPerPacket = 2048;
-  static const uint32_t kSamplesPerFrame = 512;
-  static const uint32_t kSamplesPerSubframe = 128;
-
-  static const uint32_t kOutputBytesPerBlock = 256;
-  static const uint32_t kOutputMaxSizeBytes = 31 * kOutputBytesPerBlock;
-
-  // DWORD 0
-  uint32_t input_buffer_0_packet_count : 12; // XMASetInputBuffer0, number of
-                                             // 2KB packets. Max 4095 packets.
-                                             // These packets form a block.
-  uint32_t loop_count : 8;                   // +12bit, XMASetLoopData NumLoops
-  uint32_t input_buffer_0_valid : 1;         // +20bit, XMAIsInputBuffer0Valid
-  uint32_t input_buffer_1_valid : 1;         // +21bit, XMAIsInputBuffer1Valid
-  uint32_t output_buffer_block_count : 5;    // +22bit SizeWrite 256byte blocks
-  uint32_t
-      output_buffer_write_offset : 5;  // +27bit, XMAGetOutputBufferWriteOffset
-                                       // AKA OffsetWrite
-
-  // DWORD 1
-  uint32_t input_buffer_1_packet_count : 12; // XMASetInputBuffer1, number of
-                                             // 2KB packets. Max 4095 packets.
-                                             // These packets form a block.
-  uint32_t loop_subframe_end : 2;            // +12bit, XMASetLoopData
-  uint32_t unk_dword_1_a : 3;                // ? might be loop_subframe_skip
-  uint32_t loop_subframe_skip : 3;           // +17bit, XMASetLoopData might be
-                                             // subframe_decode_count
-  uint32_t subframe_decode_count : 4;  // +20bit might be subframe_skip_count
-  uint32_t unk_dword_1_b : 3;          // ? NumSubframesToSkip/NumChannels(?)
-  uint32_t sample_rate : 2;            // +27bit enum of sample rates
-  uint32_t is_stereo : 1;              // +29bit
-  uint32_t unk_dword_1_c : 1;          // +29bit
-  uint32_t output_buffer_valid : 1;    // +31bit, XMAIsOutputBufferValid
-
-  // DWORD 2
-  uint32_t input_buffer_read_offset : 30;  // XMAGetInputBufferReadOffset
-  uint32_t unk_dword_2 : 2;                // ErrorStatus/ErrorSet (?)
-
-  // DWORD 3
-  uint32_t loop_start : 26;  // XMASetLoopData LoopStartOffset
-  uint32_t unk_dword_3 : 6;  // ? ParserErrorStatus/ParserErrorSet(?)
-
-  // DWORD 4
-  uint32_t loop_end : 26;        // XMASetLoopData LoopEndOffset
-  uint32_t packet_metadata : 5;  // XMAGetPacketMetadata
-  uint32_t current_buffer : 1;   // ?
-
-  // DWORD 5
-  uint32_t input_buffer_0_ptr;  // physical address
-  // DWORD 6
-  uint32_t input_buffer_1_ptr;  // physical address
-  // DWORD 7
-  uint32_t output_buffer_ptr;  // physical address
-  // DWORD 8
-  uint32_t overlap_add_ptr;  // PtrOverlapAdd(?)
-
-  // DWORD 9
-  // +0bit, XMAGetOutputBufferReadOffset AKA WriteBufferOffsetRead
-  uint32_t output_buffer_read_offset : 5;
-  uint32_t unk_dword_9 : 27;  // StopWhenDone/InterruptWhenDone(?)
-
-  XMAContextData(const void* ptr) {
-    xe::copy_and_swap_32_aligned(reinterpret_cast<uint32_t*>(this),
-                                 reinterpret_cast<const uint32_t*>(ptr),
-                                 sizeof(XMAContextData) / 4);
-  }
-
-  void Store(void* ptr) {
-    xe::copy_and_swap_32_aligned(reinterpret_cast<uint32_t*>(ptr),
-                                 reinterpret_cast<const uint32_t*>(this),
-                                 sizeof(XMAContextData) / 4);
-  }
-};
-static_assert(sizeof(XMAContextData) == 4 * 10, "Must be packed");
+class XmaDecoder;
 
 class AudioSystem {
- protected:
-  struct XMAContext;
-
  public:
   virtual ~AudioSystem();
 
-  Emulator* emulator() const { return emulator_; }
   Memory* memory() const { return memory_; }
   cpu::Processor* processor() const { return processor_; }
+  XmaDecoder* xma_decoder() const { return xma_decoder_.get(); }
 
-  virtual X_STATUS Setup();
+  virtual X_STATUS Setup(kernel::KernelState* kernel_state);
   virtual void Shutdown();
-
-  uint32_t xma_context_array_ptr() const {
-    return registers_.xma_context_array_ptr;
-  }
-  uint32_t AllocateXmaContext();
-  void ReleaseXmaContext(uint32_t guest_ptr);
-  bool BlockOnXmaContext(uint32_t guest_ptr, bool poll);
 
   X_STATUS RegisterClient(uint32_t callback, uint32_t callback_arg,
                           size_t* out_index);
   void UnregisterClient(size_t index);
   void SubmitFrame(size_t index, uint32_t samples_ptr);
 
-  virtual X_STATUS CreateDriver(size_t index, HANDLE wait_handle,
+  bool Save(ByteStream* stream);
+  bool Restore(ByteStream* stream);
+
+  bool is_paused() const { return paused_; }
+  void Pause();
+  void Resume();
+
+ protected:
+  explicit AudioSystem(cpu::Processor* processor);
+
+  virtual void Initialize();
+
+  void WorkerThreadMain();
+
+  virtual X_STATUS CreateDriver(size_t index,
+                                xe::threading::Semaphore* semaphore,
                                 AudioDriver** out_driver) = 0;
   virtual void DestroyDriver(AudioDriver* driver) = 0;
 
-  virtual uint64_t ReadRegister(uint32_t addr);
-  virtual void WriteRegister(uint32_t addr, uint64_t value);
+  // TODO(gibbed): respect XAUDIO2_MAX_QUEUED_BUFFERS somehow (ie min(64,
+  // XAUDIO2_MAX_QUEUED_BUFFERS))
+  static const size_t kMaximumQueuedFrames = 64;
 
- protected:
-  virtual void Initialize();
+  Memory* memory_ = nullptr;
+  cpu::Processor* processor_ = nullptr;
+  std::unique_ptr<XmaDecoder> xma_decoder_;
 
- private:
-  void WorkerThreadMain();
-  void DecoderThreadMain();
-
-  void ProcessXmaContext(XMAContext& context, XMAContextData& data);
-  int PrepareXMAPacket(XMAContext& context, XMAContextData& data);
-
-  static uint64_t MMIOReadRegisterThunk(void* ppc_context, AudioSystem* as,
-                                        uint32_t addr) {
-    return as->ReadRegister(addr);
-  }
-  static void MMIOWriteRegisterThunk(void* ppc_context, AudioSystem* as,
-                                     uint32_t addr, uint64_t value) {
-    as->WriteRegister(addr, value);
-  }
-
- protected:
-  AudioSystem(Emulator* emulator);
-
-  Emulator* emulator_;
-  Memory* memory_;
-  cpu::Processor* processor_;
-
-  std::atomic<bool> worker_running_;
+  std::atomic<bool> worker_running_ = {false};
   kernel::object_ref<kernel::XHostThread> worker_thread_;
 
-  std::atomic<bool> decoder_running_;
-  kernel::object_ref<kernel::XHostThread> decoder_thread_;
-  xe::threading::Fence decoder_fence_;
-
-  xe::mutex lock_;
-
-  // Stored little endian, accessed through 0x7FEA....
-  union {
-    struct {
-      union {
-        struct {
-          uint8_t ignored0[0x1800];
-          // 1800h; points to guest-space physical block of 320 contexts.
-          uint32_t xma_context_array_ptr;
-        };
-        struct {
-          uint8_t ignored1[0x1818];
-          // 1818h; current context ID.
-          uint32_t current_context;
-          // 181Ch; next context ID to process.
-          uint32_t next_context;
-        };
-      };
-    } registers_;
-    uint32_t register_file_[0xFFFF / 4];
-  };
-  struct XMAContext {
-    uint32_t guest_ptr;
-    xe::mutex lock;
-    bool in_use;
-    bool kicked;
-
-    AudioDecoder* decoder;
-  };
-
-  XMAContext xma_context_array_[320];
-  std::vector<uint32_t> xma_context_free_list_;
-  std::vector<uint32_t> xma_context_used_list_;  // XMA contexts in use
-
-  static const size_t maximum_client_count_ = 8;
-
+  xe::global_critical_region global_critical_region_;
+  static const size_t kMaximumClientCount = 8;
   struct {
     AudioDriver* driver;
     uint32_t callback;
     uint32_t callback_arg;
     uint32_t wrapped_callback_arg;
-  } clients_[maximum_client_count_];
-  // Last handle is always there in case we have no clients.
-  HANDLE client_wait_handles_[maximum_client_count_ + 1];
-  std::queue<size_t> unused_clients_;
+    bool in_use;
+  } clients_[kMaximumClientCount];
+
+  int FindFreeClient();
+
+  std::unique_ptr<xe::threading::Semaphore>
+      client_semaphores_[kMaximumClientCount];
+  // Event is always there in case we have no clients.
+  std::unique_ptr<xe::threading::Event> shutdown_event_;
+  xe::threading::WaitHandle* wait_handles_[kMaximumClientCount + 1];
+
+  bool paused_ = false;
+  threading::Fence pause_fence_;
+  std::unique_ptr<threading::Event> resume_event_;
 };
 
 }  // namespace apu

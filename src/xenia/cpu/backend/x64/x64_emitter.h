@@ -7,26 +7,26 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_BACKEND_X64_X64_EMITTER_H_
-#define XENIA_BACKEND_X64_X64_EMITTER_H_
+#ifndef XENIA_CPU_BACKEND_X64_X64_EMITTER_H_
+#define XENIA_CPU_BACKEND_X64_X64_EMITTER_H_
 
+#include <vector>
+
+#include "xenia/base/arena.h"
+#include "xenia/cpu/function.h"
+#include "xenia/cpu/function_trace_data.h"
+#include "xenia/cpu/hir/hir_builder.h"
+#include "xenia/cpu/hir/instr.h"
+#include "xenia/cpu/hir/value.h"
+#include "xenia/memory.h"
+
+// NOTE: must be included last as it expects windows.h to already be included.
 #include "third_party/xbyak/xbyak/xbyak.h"
 #include "third_party/xbyak/xbyak/xbyak_util.h"
 
-#include "xenia/base/arena.h"
-#include "xenia/cpu/hir/value.h"
-#include "xenia/debug/function_trace_data.h"
-
 namespace xe {
 namespace cpu {
-class DebugInfo;
-class FunctionInfo;
 class Processor;
-class SymbolInfo;
-namespace hir {
-class HIRBuilder;
-class Instr;
-}  // namespace hir
 }  // namespace cpu
 }  // namespace xe
 
@@ -103,6 +103,7 @@ enum X64EmitterFeatureFlags {
   kX64EmitLZCNT = 1 << 3,
   kX64EmitBMI2 = 1 << 4,
   kX64EmitF16C = 1 << 5,
+  kX64EmitMovbe = 1 << 6,
 };
 
 class X64Emitter : public Xbyak::CodeGenerator {
@@ -113,9 +114,12 @@ class X64Emitter : public Xbyak::CodeGenerator {
   Processor* processor() const { return processor_; }
   X64Backend* backend() const { return backend_; }
 
-  bool Emit(uint32_t guest_address, hir::HIRBuilder* builder,
-            uint32_t debug_info_flags, DebugInfo* debug_info,
-            void*& out_code_address, size_t& out_code_size);
+  bool Emit(GuestFunction* function, hir::HIRBuilder* builder,
+            uint32_t debug_info_flags, FunctionDebugInfo* debug_info,
+            void** out_code_address, size_t* out_code_size,
+            std::vector<SourceMapEntry>* out_source_map);
+
+  static uint32_t PlaceData(Memory* memory);
 
  public:
   // Reserved:  rsp
@@ -147,16 +151,17 @@ class X64Emitter : public Xbyak::CodeGenerator {
     r = Xbyak::Xmm(idx);
   }
 
+  Xbyak::Label& epilog_label() { return *epilog_label_; }
+
   void MarkSourceOffset(const hir::Instr* i);
 
   void DebugBreak();
   void Trap(uint16_t trap_type = 0);
   void UnimplementedInstr(const hir::Instr* i);
-  void UnimplementedExtern(const hir::Instr* i);
 
-  void Call(const hir::Instr* instr, FunctionInfo* symbol_info);
+  void Call(const hir::Instr* instr, GuestFunction* function);
   void CallIndirect(const hir::Instr* instr, const Xbyak::Reg64& reg);
-  void CallExtern(const hir::Instr* instr, const FunctionInfo* symbol_info);
+  void CallExtern(const hir::Instr* instr, const Function* function);
   void CallNative(void* fn);
   void CallNative(uint64_t (*fn)(void* raw_context));
   void CallNative(uint64_t (*fn)(void* raw_context, uint64_t arg0));
@@ -170,9 +175,6 @@ class X64Emitter : public Xbyak::CodeGenerator {
   void nop(size_t length = 1);
 
   // TODO(benvanik): Label for epilog (don't use strings).
-
-  void LoadEflags();
-  void StoreEflags();
 
   // Moves a 64bit immediate into memory.
   bool ConstantFitsIn32Reg(uint64_t v);
@@ -188,32 +190,34 @@ class X64Emitter : public Xbyak::CodeGenerator {
     return (feature_flags_ & feature_flag) != 0;
   }
 
-  DebugInfo* debug_info() const { return debug_info_; }
+  FunctionDebugInfo* debug_info() const { return debug_info_; }
 
   size_t stack_size() const { return stack_size_; }
 
  protected:
-  void* Emplace(uint32_t guest_address, size_t stack_size);
-  bool Emit(hir::HIRBuilder* builder, size_t& out_stack_size);
+  void* Emplace(size_t stack_size, GuestFunction* function = nullptr);
+  bool Emit(hir::HIRBuilder* builder, size_t* out_stack_size);
   void EmitGetCurrentThreadId();
   void EmitTraceUserCallReturn();
 
  protected:
-  Processor* processor_;
-  X64Backend* backend_;
-  X64CodeCache* code_cache_;
-  XbyakAllocator* allocator_;
+  Processor* processor_ = nullptr;
+  X64Backend* backend_ = nullptr;
+  X64CodeCache* code_cache_ = nullptr;
+  XbyakAllocator* allocator_ = nullptr;
   Xbyak::util::Cpu cpu_;
-  uint32_t feature_flags_;
+  uint32_t feature_flags_ = 0;
 
-  hir::Instr* current_instr_;
+  Xbyak::Label* epilog_label_ = nullptr;
 
-  DebugInfo* debug_info_;
-  uint32_t debug_info_flags_;
-  size_t source_map_count_;
+  hir::Instr* current_instr_ = nullptr;
+
+  FunctionDebugInfo* debug_info_ = nullptr;
+  uint32_t debug_info_flags_ = 0;
+  FunctionTraceData* trace_data_ = nullptr;
   Arena source_map_arena_;
 
-  size_t stack_size_;
+  size_t stack_size_ = 0;
 
   static const uint32_t gpr_reg_map_[GPR_COUNT];
   static const uint32_t xmm_reg_map_[XMM_COUNT];
@@ -224,4 +228,4 @@ class X64Emitter : public Xbyak::CodeGenerator {
 }  // namespace cpu
 }  // namespace xe
 
-#endif  // XENIA_BACKEND_X64_X64_EMITTER_H_
+#endif  // XENIA_CPU_BACKEND_X64_X64_EMITTER_H_

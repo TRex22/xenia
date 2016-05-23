@@ -7,18 +7,20 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_GPU_GL4_GL4_STATE_DATA_BUILDER_H_
-#define XENIA_GPU_GL4_GL4_STATE_DATA_BUILDER_H_
+#ifndef XENIA_GPU_GL4_DRAW_BATCHER_H_
+#define XENIA_GPU_GL4_DRAW_BATCHER_H_
 
-#include "xenia/gpu/gl4/circular_buffer.h"
-#include "xenia/gpu/gl4/gl_context.h"
 #include "xenia/gpu/gl4/gl4_shader.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/ui/gl/circular_buffer.h"
+#include "xenia/ui/gl/gl_context.h"
 
 namespace xe {
 namespace gpu {
 namespace gl4 {
+
+using xe::ui::gl::CircularBuffer;
 
 union float4 {
   float v[4];
@@ -41,24 +43,6 @@ struct DrawElementsIndirectCommand {
   GLint base_vertex;
   GLuint base_instance;
 };
-struct BindlessPtrNV {
-  GLuint index;
-  GLuint reserved_zero;
-  GLuint64 address;
-  GLuint64 length;
-};
-struct DrawArraysIndirectBindlessCommandNV {
-  DrawArraysIndirectCommand cmd;
-  // NOTE: the spec is wrong here. For fucks sake.
-  // GLuint reserved_zero;
-  BindlessPtrNV vertex_buffers[8];
-};
-struct DrawElementsIndirectBindlessCommandNV {
-  DrawElementsIndirectCommand cmd;
-  GLuint reserved_zero;
-  BindlessPtrNV index_buffer;
-  BindlessPtrNV vertex_buffers[8];
-};
 #pragma pack(pop)
 
 class DrawBatcher {
@@ -69,7 +53,7 @@ class DrawBatcher {
     kReconfigure,
   };
 
-  DrawBatcher(RegisterFile* register_file);
+  explicit DrawBatcher(RegisterFile* register_file);
 
   bool Initialize(CircularBuffer* array_data_buffer);
   void Shutdown();
@@ -88,40 +72,21 @@ class DrawBatcher {
   }
   void set_alpha_test(bool enabled, uint32_t func, float ref) {
     active_draw_.header->alpha_test.x = enabled ? 1.0f : 0.0f;
-    active_draw_.header->alpha_test.y = float(func);
+    active_draw_.header->alpha_test.y = static_cast<float>(func);
     active_draw_.header->alpha_test.z = ref;
   }
-  void set_texture_sampler(int index, GLuint64 handle) {
+  void set_ps_param_gen(int register_index) {
+    active_draw_.header->ps_param_gen = register_index;
+  }
+  void set_texture_sampler(int index, GLuint64 handle, uint32_t swizzle) {
     active_draw_.header->texture_samplers[index] = handle;
+    active_draw_.header->texture_swizzles[index] = swizzle;
   }
   void set_index_buffer(const CircularBuffer::Allocation& allocation) {
-    if (has_bindless_mdi_) {
-      auto& ptr = active_draw_.draw_elements_bindless_cmd->index_buffer;
-      ptr.reserved_zero = 0;
-      ptr.index = 0;
-      ptr.address = allocation.gpu_ptr;
-      ptr.length = allocation.length;
-    } else {
-      // Offset is used in glDrawElements.
-      auto& cmd = active_draw_.draw_elements_cmd;
-      size_t index_size = batch_state_.index_type == GL_UNSIGNED_SHORT ? 2 : 4;
-      cmd->first_index = GLuint(allocation.offset / index_size);
-    }
-  }
-  void set_vertex_buffer(int index, GLsizei offset, GLsizei stride,
-                         const CircularBuffer::Allocation& allocation) {
-    if (has_bindless_mdi_) {
-      BindlessPtrNV* ptr;
-      if (batch_state_.indexed) {
-        ptr = &active_draw_.draw_elements_bindless_cmd->vertex_buffers[index];
-      } else {
-        ptr = &active_draw_.draw_arrays_bindless_cmd->vertex_buffers[index];
-      }
-      ptr->reserved_zero = 0;
-      ptr->index = index;
-      ptr->address = allocation.gpu_ptr + offset;
-      ptr->length = allocation.length - offset;
-    }
+    // Offset is used in glDrawElements.
+    auto& cmd = active_draw_.draw_elements_cmd;
+    size_t index_size = batch_state_.index_type == GL_UNSIGNED_SHORT ? 2 : 4;
+    cmd->first_index = GLuint(allocation.offset / index_size);
   }
 
   bool ReconfigurePipeline(GL4Shader* vertex_shader, GL4Shader* pixel_shader,
@@ -129,12 +94,26 @@ class DrawBatcher {
 
   bool BeginDrawArrays(PrimitiveType prim_type, uint32_t index_count);
   bool BeginDrawElements(PrimitiveType prim_type, uint32_t index_count,
-                         xenos::IndexFormat index_format);
+                         IndexFormat index_format);
   void DiscardDraw();
   bool CommitDraw();
   bool Flush(FlushMode mode);
 
+  // TFB - Filled with vertex shader output from the last flush.
+  size_t QueryTFBSize();
+  bool ReadbackTFB(void* buffer, size_t size);
+
+  GLuint tfvbo() { return tfvbo_; }
+  bool is_tfb_enabled() const { return tfb_enabled_; }
+  void set_tfb_enabled(bool enabled) { tfb_enabled_ = enabled; }
+
  private:
+  bool InitializeTFB();
+  void ShutdownTFB();
+
+  void TFBBegin(PrimitiveType prim_type);
+  void TFBEnd();
+
   bool BeginDraw();
   void CopyConstants();
 
@@ -143,7 +122,13 @@ class DrawBatcher {
   CircularBuffer state_buffer_;
   CircularBuffer* array_data_buffer_;
 
-  bool has_bindless_mdi_;
+  GLuint tfbo_ = 0;
+  GLuint tfvbo_ = 0;
+  GLuint tfqo_ = 0;
+  PrimitiveType tfb_prim_type_ = PrimitiveType::kNone;
+  GLenum tfb_prim_type_gl_ = 0;
+  GLint tfb_prim_count_ = 0;
+  bool tfb_enabled_ = false;
 
   struct BatchState {
     bool needs_reconfigure;
@@ -173,9 +158,12 @@ class DrawBatcher {
     float4 window_scale;  // sx,sy, ?, ?
     float4 vtx_fmt;       //
     float4 alpha_test;    // alpha test enable, func, ref, ?
+    int ps_param_gen;
+    int padding[3];
 
     // TODO(benvanik): pack tightly
     GLuint64 texture_samplers[32];
+    GLuint texture_swizzles[32];
 
     float4 float_consts[512];
     uint32_t bool_consts[8];
@@ -188,8 +176,6 @@ class DrawBatcher {
     union {
       DrawArraysIndirectCommand* draw_arrays_cmd;
       DrawElementsIndirectCommand* draw_elements_cmd;
-      DrawArraysIndirectBindlessCommandNV* draw_arrays_bindless_cmd;
-      DrawElementsIndirectBindlessCommandNV* draw_elements_bindless_cmd;
       uintptr_t command_address;
     };
 
@@ -202,4 +188,4 @@ class DrawBatcher {
 }  // namespace gpu
 }  // namespace xe
 
-#endif  // XENIA_GPU_GL4_GL4_STATE_DATA_BUILDER_H_
+#endif  // XENIA_GPU_GL4_DRAW_BATCHER_H_

@@ -25,7 +25,10 @@ bool IsDebuggerAttached();
 // If no debugger is present, a signal will be raised.
 void Break();
 
-void DebugPrint(const char *fmt, ...);
+// Prints a message to the attached debugger.
+// This bypasses the normal logging mechanism. If no debugger is attached it's
+// likely to no-op.
+void DebugPrint(const char* fmt, ...);
 
 }  // namespace debugging
 }  // namespace xe

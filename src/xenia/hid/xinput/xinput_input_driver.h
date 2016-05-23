@@ -7,11 +7,10 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_HID_XINPUT_XINPUT_DRIVER_H_
-#define XENIA_HID_XINPUT_XINPUT_DRIVER_H_
+#ifndef XENIA_HID_XINPUT_XINPUT_INPUT_DRIVER_H_
+#define XENIA_HID_XINPUT_XINPUT_INPUT_DRIVER_H_
 
 #include "xenia/hid/input_driver.h"
-#include "xenia/hid/nop/nop_hid-private.h"
 
 namespace xe {
 namespace hid {
@@ -19,7 +18,7 @@ namespace xinput {
 
 class XInputInputDriver : public InputDriver {
  public:
-  XInputInputDriver(InputSystem* input_system);
+  explicit XInputInputDriver(xe::ui::Window* window);
   ~XInputInputDriver() override;
 
   X_STATUS Setup() override;
@@ -38,4 +37,4 @@ class XInputInputDriver : public InputDriver {
 }  // namespace hid
 }  // namespace xe
 
-#endif  // XENIA_HID_XINPUT_XINPUT_DRIVER_H_
+#endif  // XENIA_HID_XINPUT_XINPUT_INPUT_DRIVER_H_

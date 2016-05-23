@@ -11,6 +11,7 @@
 #define XENIA_BASE_VEC128_H_
 
 #include <cstddef>
+#include <string>
 
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
@@ -104,12 +105,54 @@ typedef struct alignas(16) vec128_s {
     };
   };
 
+  vec128_s() = default;
+  vec128_s(const vec128_s& other) {
+    high = other.high;
+    low = other.low;
+  }
+
+  vec128_s& operator=(const vec128_s& b) {
+    high = b.high;
+    low = b.low;
+    return *this;
+  }
+
   bool operator==(const vec128_s& b) const {
     return low == b.low && high == b.high;
   }
   bool operator!=(const vec128_s& b) const {
     return low != b.low || high != b.high;
   }
+  vec128_s operator^(const vec128_s& b) const {
+    vec128_s a = *this;
+    a.high ^= b.high;
+    a.low ^= b.low;
+    return a;
+  };
+  vec128_s& operator^=(const vec128_s& b) {
+    *this = *this ^ b;
+    return *this;
+  };
+  vec128_s operator&(const vec128_s& b) const {
+    vec128_s a = *this;
+    a.high &= b.high;
+    a.low &= b.low;
+    return a;
+  };
+  vec128_s& operator&=(const vec128_s& b) {
+    *this = *this & b;
+    return *this;
+  };
+  vec128_s operator|(const vec128_s& b) const {
+    vec128_s a = *this;
+    a.high |= b.high;
+    a.low |= b.low;
+    return a;
+  };
+  vec128_s& operator|=(const vec128_s& b) {
+    *this = *this | b;
+    return *this;
+  };
 } vec128_t;
 
 static inline vec128_t vec128i(uint32_t src) {
@@ -192,6 +235,13 @@ static inline vec128_t vec128b(uint8_t x0, uint8_t x1, uint8_t x2, uint8_t x3,
   v.u8[14] = w1;
   v.u8[15] = w0;
   return v;
+}
+
+inline std::string to_string(const vec128_t& value) {
+  char buffer[128];
+  std::snprintf(buffer, sizeof(buffer), "(%g, %g, %g, %g)", value.x, value.y,
+                value.z, value.w);
+  return std::string(buffer);
 }
 
 }  // namespace xe

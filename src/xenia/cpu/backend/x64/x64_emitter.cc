@@ -11,58 +11,52 @@
 
 #include <gflags/gflags.h>
 
+#include <climits>
+#include <cstring>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/profiling.h"
 #include "xenia/base/vec128.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
 #include "xenia/cpu/backend/x64/x64_function.h"
 #include "xenia/cpu/backend/x64/x64_sequences.h"
-#include "xenia/cpu/backend/x64/x64_thunk_emitter.h"
-#include "xenia/cpu/cpu-private.h"
-#include "xenia/cpu/debug_info.h"
-#include "xenia/cpu/hir/hir_builder.h"
+#include "xenia/cpu/backend/x64/x64_stack_layout.h"
+#include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/function.h"
+#include "xenia/cpu/function_debug_info.h"
 #include "xenia/cpu/processor.h"
-#include "xenia/cpu/symbol_info.h"
+#include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
-#include "xenia/profiling.h"
-
-DEFINE_bool(
-    enable_haswell_instructions, true,
-    "Uses the AVX2/FMA/etc instructions on Haswell processors, if available.");
 
 DEFINE_bool(enable_debugprint_log, false,
             "Log debugprint traps to the active debugger");
+DEFINE_bool(ignore_undefined_externs, true,
+            "Don't exit when an undefined extern is called.");
+DEFINE_bool(emit_source_annotations, false,
+            "Add extra movs and nops to make disassembly easier to read.");
 
 namespace xe {
 namespace cpu {
 namespace backend {
 namespace x64 {
 
-// TODO(benvanik): remove when enums redefined.
-using namespace xe::cpu::hir;
-using namespace xe::cpu;
-
-using namespace Xbyak;
 using xe::cpu::hir::HIRBuilder;
 using xe::cpu::hir::Instr;
 
-static const size_t MAX_CODE_SIZE = 1 * 1024 * 1024;
+static const size_t kMaxCodeSize = 1 * 1024 * 1024;
 
-static const size_t STASH_OFFSET = 32;
-static const size_t STASH_OFFSET_HIGH = 32 + 32;
-
-// If we are running with tracing on we have to store the EFLAGS in the stack,
-// otherwise our calls out to C to print will clear it before DID_CARRY/etc
-// can get the value.
-#define STORE_EFLAGS 1
+static const size_t kStashOffset = 32;
+// static const size_t kStashOffsetHigh = 32 + 32;
 
 const uint32_t X64Emitter::gpr_reg_map_[X64Emitter::GPR_COUNT] = {
-    Operand::RBX, Operand::R12, Operand::R13, Operand::R14, Operand::R15,
+    Xbyak::Operand::RBX, Xbyak::Operand::R12, Xbyak::Operand::R13,
+    Xbyak::Operand::R14, Xbyak::Operand::R15,
 };
 
 const uint32_t X64Emitter::xmm_reg_map_[X64Emitter::XMM_COUNT] = {
@@ -70,76 +64,82 @@ const uint32_t X64Emitter::xmm_reg_map_[X64Emitter::XMM_COUNT] = {
 };
 
 X64Emitter::X64Emitter(X64Backend* backend, XbyakAllocator* allocator)
-    : CodeGenerator(MAX_CODE_SIZE, AutoGrow, allocator),
+    : CodeGenerator(kMaxCodeSize, Xbyak::AutoGrow, allocator),
       processor_(backend->processor()),
       backend_(backend),
       code_cache_(backend->code_cache()),
-      allocator_(allocator),
-      feature_flags_(0),
-      current_instr_(0),
-      debug_info_(nullptr),
-      debug_info_flags_(0),
-      source_map_count_(0),
-      stack_size_(0) {
+      allocator_(allocator) {
   if (FLAGS_enable_haswell_instructions) {
     feature_flags_ |= cpu_.has(Xbyak::util::Cpu::tAVX2) ? kX64EmitAVX2 : 0;
     feature_flags_ |= cpu_.has(Xbyak::util::Cpu::tFMA) ? kX64EmitFMA : 0;
     feature_flags_ |= cpu_.has(Xbyak::util::Cpu::tLZCNT) ? kX64EmitLZCNT : 0;
     feature_flags_ |= cpu_.has(Xbyak::util::Cpu::tBMI2) ? kX64EmitBMI2 : 0;
     feature_flags_ |= cpu_.has(Xbyak::util::Cpu::tF16C) ? kX64EmitF16C : 0;
+    feature_flags_ |= cpu_.has(Xbyak::util::Cpu::tMOVBE) ? kX64EmitMovbe : 0;
+  }
+
+  if (!cpu_.has(Xbyak::util::Cpu::tAVX)) {
+    xe::FatalError(
+        "Your CPU is too old to support Xenia. See the FAQ for system "
+        "requirements at http://xenia.jp");
+    return;
   }
 }
 
 X64Emitter::~X64Emitter() = default;
 
-bool X64Emitter::Emit(uint32_t guest_address, HIRBuilder* builder,
-                      uint32_t debug_info_flags, DebugInfo* debug_info,
-                      void*& out_code_address, size_t& out_code_size) {
+bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
+                      uint32_t debug_info_flags, FunctionDebugInfo* debug_info,
+                      void** out_code_address, size_t* out_code_size,
+                      std::vector<SourceMapEntry>* out_source_map) {
   SCOPE_profile_cpu_f("cpu");
 
   // Reset.
   debug_info_ = debug_info;
   debug_info_flags_ = debug_info_flags;
-  if (debug_info_flags_ & DebugInfoFlags::kDebugInfoSourceMap) {
-    source_map_count_ = 0;
-    source_map_arena_.Reset();
-  }
+  trace_data_ = &function->trace_data();
+  source_map_arena_.Reset();
 
   // Fill the generator with code.
   size_t stack_size = 0;
-  if (!Emit(builder, stack_size)) {
+  if (!Emit(builder, &stack_size)) {
     return false;
   }
 
   // Copy the final code to the cache and relocate it.
-  out_code_size = getSize();
-  out_code_address = Emplace(guest_address, stack_size);
+  *out_code_size = getSize();
+  *out_code_address = Emplace(stack_size, function);
 
   // Stash source map.
-  if (debug_info_flags_ & DebugInfoFlags::kDebugInfoSourceMap) {
-    debug_info->InitializeSourceMap(
-        source_map_count_, (SourceMapEntry*)source_map_arena_.CloneContents());
-  }
+  source_map_arena_.CloneContents(out_source_map);
 
   return true;
 }
 
-void* X64Emitter::Emplace(uint32_t guest_address, size_t stack_size) {
+void* X64Emitter::Emplace(size_t stack_size, GuestFunction* function) {
   // To avoid changing xbyak, we do a switcharoo here.
   // top_ points to the Xbyak buffer, and since we are in AutoGrow mode
   // it has pending relocations. We copy the top_ to our buffer, swap the
   // pointer, relocate, then return the original scratch pointer for use.
   uint8_t* old_address = top_;
-  void* new_address =
-      code_cache_->PlaceCode(guest_address, top_, size_, stack_size);
-  top_ = (uint8_t*)new_address;
+  void* new_address;
+  if (function) {
+    new_address = code_cache_->PlaceGuestCode(function->address(), top_, size_,
+                                              stack_size, function);
+  } else {
+    new_address = code_cache_->PlaceHostCode(0, top_, size_, stack_size);
+  }
+  top_ = reinterpret_cast<uint8_t*>(new_address);
   ready();
   top_ = old_address;
   reset();
   return new_address;
 }
 
-bool X64Emitter::Emit(HIRBuilder* builder, size_t& out_stack_size) {
+bool X64Emitter::Emit(HIRBuilder* builder, size_t* out_stack_size) {
+  Xbyak::Label epilog_label;
+  epilog_label_ = &epilog_label;
+
   // Calculate stack size. We need to align things to their natural sizes.
   // This could be much better (sort by type/etc).
   auto locals = builder->locals();
@@ -169,7 +169,7 @@ bool X64Emitter::Emit(HIRBuilder* builder, size_t& out_stack_size) {
   //     Adding or changing anything here must be matched!
   const size_t stack_size = StackLayout::GUEST_STACK_SIZE + stack_offset;
   assert_true((stack_size + 8) % 16 == 0);
-  out_stack_size = stack_size;
+  *out_stack_size = stack_size;
   stack_size_ = stack_size;
   sub(rsp, (uint32_t)stack_size);
   mov(qword[rsp + StackLayout::GUEST_RCX_HOME], rcx);
@@ -179,21 +179,21 @@ bool X64Emitter::Emit(HIRBuilder* builder, size_t& out_stack_size) {
   // Safe now to do some tracing.
   if (debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctions) {
     // We require 32-bit addresses.
-    assert_true(uint64_t(debug_info_->trace_data().header()) < UINT_MAX);
-    auto trace_header = debug_info_->trace_data().header();
+    assert_true(uint64_t(trace_data_->header()) < UINT_MAX);
+    auto trace_header = trace_data_->header();
 
     // Call count.
     lock();
     inc(qword[low_address(&trace_header->function_call_count)]);
 
     // Get call history slot.
-    static_assert(debug::FunctionTraceData::kFunctionCallerHistoryCount == 4,
+    static_assert(FunctionTraceData::kFunctionCallerHistoryCount == 4,
                   "bitmask depends on count");
     mov(rax, qword[low_address(&trace_header->function_call_count)]);
-    and(rax, B00000011);
+    and_(rax, 0b00000011);
 
     // Record call history value into slot (guest addr in RDX).
-    mov(dword[RegExp(uint32_t(uint64_t(
+    mov(dword[Xbyak::RegExp(uint32_t(uint64_t(
                   low_address(&trace_header->function_caller_history)))) +
               rax * 4],
         edx);
@@ -221,7 +221,7 @@ bool X64Emitter::Emit(HIRBuilder* builder, size_t& out_stack_size) {
     const Instr* instr = block->instr_head;
     while (instr) {
       const Instr* new_tail = instr;
-      if (!SelectSequence(*this, instr, &new_tail)) {
+      if (!SelectSequence(this, instr, &new_tail)) {
         // No sequence found!
         assert_always();
         XELOGE("Unable to process HIR opcode %s", instr->opcode->name);
@@ -234,13 +234,14 @@ bool X64Emitter::Emit(HIRBuilder* builder, size_t& out_stack_size) {
   }
 
   // Function epilog.
-  L("epilog");
+  L(epilog_label);
+  epilog_label_ = nullptr;
   EmitTraceUserCallReturn();
   mov(rcx, qword[rsp + StackLayout::GUEST_RCX_HOME]);
   add(rsp, (uint32_t)stack_size);
   ret();
 
-  if (FLAGS_debug) {
+  if (FLAGS_emit_source_annotations) {
     nop();
     nop();
     nop();
@@ -253,33 +254,30 @@ bool X64Emitter::Emit(HIRBuilder* builder, size_t& out_stack_size) {
 
 void X64Emitter::MarkSourceOffset(const Instr* i) {
   auto entry = source_map_arena_.Alloc<SourceMapEntry>();
-  entry->source_offset = static_cast<uint32_t>(i->src1.offset);
+  entry->guest_address = static_cast<uint32_t>(i->src1.offset);
   entry->hir_offset = uint32_t(i->block->ordinal << 16) | i->ordinal;
-  entry->code_offset = static_cast<uint32_t>(getSize() + 1);
-  source_map_count_++;
+  entry->code_offset = static_cast<uint32_t>(getSize());
 
-  if (FLAGS_debug) {
+  if (FLAGS_emit_source_annotations) {
     nop();
     nop();
-    mov(eax, entry->source_offset);
+    mov(eax, entry->guest_address);
     nop();
     nop();
   }
 
   if (debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) {
-    auto trace_data = debug_info_->trace_data();
     uint32_t instruction_index =
-        (entry->source_offset - trace_data.start_address()) / 4;
+        (entry->guest_address - trace_data_->start_address()) / 4;
     lock();
-    inc(qword[low_address(trace_data.instruction_execute_counts() +
+    inc(qword[low_address(trace_data_->instruction_execute_counts() +
                           instruction_index * 8)]);
   }
 }
 
 void X64Emitter::EmitGetCurrentThreadId() {
   // rcx must point to context. We could fetch from the stack if needed.
-  mov(ax,
-      word[rcx + processor_->frontend()->context_info()->thread_id_offset()]);
+  mov(ax, word[rcx + offsetof(ppc::PPCContext, thread_id)]);
 }
 
 void X64Emitter::EmitTraceUserCallReturn() {}
@@ -292,7 +290,7 @@ void X64Emitter::DebugBreak() {
 uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
   uint32_t str_ptr = uint32_t(thread_state->context()->r[3]);
-  uint16_t str_len = uint16_t(thread_state->context()->r[4]);
+  // uint16_t str_len = uint16_t(thread_state->context()->r[4]);
   auto str = thread_state->memory()->TranslateVirtual<const char*>(str_ptr);
   // TODO(benvanik): truncate to length?
   XELOGD("(DebugPrint) %s", str);
@@ -301,6 +299,15 @@ uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
     debugging::DebugPrint("(DebugPrint) %s\n", str);
   }
 
+  return 0;
+}
+
+uint64_t TrapDebugBreak(void* raw_context, uint64_t address) {
+  auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
+  XELOGE("tw/td forced trap hit! This should be a crash!");
+  if (FLAGS_break_on_debugbreak) {
+    xe::debugging::Break();
+  }
   return 0;
 }
 
@@ -315,9 +322,7 @@ void X64Emitter::Trap(uint16_t trap_type) {
     case 22:
       // Always trap?
       // TODO(benvanik): post software interrupt to debugger.
-      if (FLAGS_break_on_debugbreak) {
-        db(0xCC);
-      }
+      CallNative(TrapDebugBreak, 0);
       break;
     case 25:
       // ?
@@ -343,8 +348,7 @@ extern "C" uint64_t ResolveFunction(void* raw_context,
   // TODO(benvanik): required?
   assert_not_zero(target_address);
 
-  Function* fn = NULL;
-  thread_state->processor()->ResolveFunction(target_address, &fn);
+  auto fn = thread_state->processor()->ResolveFunction(target_address);
   assert_not_null(fn);
   auto x64_fn = static_cast<X64Function*>(fn);
   uint64_t addr = reinterpret_cast<uint64_t>(x64_fn->machine_code());
@@ -352,24 +356,34 @@ extern "C" uint64_t ResolveFunction(void* raw_context,
   return addr;
 }
 
-void X64Emitter::Call(const hir::Instr* instr, FunctionInfo* symbol_info) {
-  auto fn = reinterpret_cast<X64Function*>(symbol_info->function());
+void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
+  assert_not_null(function);
+  auto fn = static_cast<X64Function*>(function);
   // Resolve address to the function to call and store in rax.
-  if (fn) {
+  if (fn->machine_code()) {
     // TODO(benvanik): is it worth it to do this? It removes the need for
     // a ResolveFunction call, but makes the table less useful.
     assert_zero(uint64_t(fn->machine_code()) & 0xFFFFFFFF00000000);
     mov(eax, uint32_t(uint64_t(fn->machine_code())));
-  } else {
+  } else if (code_cache_->has_indirection_table()) {
     // Load the pointer to the indirection table maintained in X64CodeCache.
     // The target dword will either contain the address of the generated code
     // or a thunk to ResolveAddress.
-    mov(ebx, symbol_info->address());
+    mov(ebx, function->address());
     mov(eax, dword[ebx]);
+  } else {
+    // Old-style resolve.
+    // Not too important because indirection table is almost always available.
+    // TODO: Overwrite the call-site with a straight call.
+    mov(rax, reinterpret_cast<uint64_t>(ResolveFunction));
+    mov(rdx, function->address());
+    call(rax);
+    ReloadECX();
+    ReloadEDX();
   }
 
   // Actually jump/call to rax.
-  if (instr->flags & CALL_TAIL) {
+  if (instr->flags & hir::CALL_TAIL) {
     // Since we skip the prolog we need to mark the return here.
     EmitTraceUserCallReturn();
 
@@ -386,23 +400,34 @@ void X64Emitter::Call(const hir::Instr* instr, FunctionInfo* symbol_info) {
   }
 }
 
-void X64Emitter::CallIndirect(const hir::Instr* instr, const Reg64& reg) {
+void X64Emitter::CallIndirect(const hir::Instr* instr,
+                              const Xbyak::Reg64& reg) {
   // Check if return.
-  if (instr->flags & CALL_POSSIBLE_RETURN) {
+  if (instr->flags & hir::CALL_POSSIBLE_RETURN) {
     cmp(reg.cvt32(), dword[rsp + StackLayout::GUEST_RET_ADDR]);
-    je("epilog", CodeGenerator::T_NEAR);
+    je(epilog_label(), CodeGenerator::T_NEAR);
   }
 
   // Load the pointer to the indirection table maintained in X64CodeCache.
   // The target dword will either contain the address of the generated code
   // or a thunk to ResolveAddress.
-  if (reg.cvt32() != ebx) {
-    mov(ebx, reg.cvt32());
+  if (code_cache_->has_indirection_table()) {
+    if (reg.cvt32() != ebx) {
+      mov(ebx, reg.cvt32());
+    }
+    mov(eax, dword[ebx]);
+  } else {
+    // Old-style resolve.
+    // Not too important because indirection table is almost always available.
+    mov(edx, reg.cvt32());
+    mov(rax, reinterpret_cast<uint64_t>(ResolveFunction));
+    call(rax);
+    ReloadECX();
+    ReloadEDX();
   }
-  mov(eax, dword[ebx]);
 
   // Actually jump/call to rax.
-  if (instr->flags & CALL_TAIL) {
+  if (instr->flags & hir::CALL_TAIL) {
     // Since we skip the prolog we need to mark the return here.
     EmitTraceUserCallReturn();
 
@@ -419,43 +444,55 @@ void X64Emitter::CallIndirect(const hir::Instr* instr, const Reg64& reg) {
   }
 }
 
-uint64_t UndefinedCallExtern(void* raw_context, uint64_t symbol_info_ptr) {
-  auto symbol_info = reinterpret_cast<FunctionInfo*>(symbol_info_ptr);
-  XELOGW("undefined extern call to %.8X %s", symbol_info->address(),
-         symbol_info->name().c_str());
+uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
+  auto function = reinterpret_cast<Function*>(function_ptr);
+  if (!FLAGS_ignore_undefined_externs) {
+    xe::FatalError("undefined extern call to %.8X %s", function->address(),
+                   function->name().c_str());
+  } else {
+    XELOGE("undefined extern call to %.8X %s", function->address(),
+           function->name().c_str());
+  }
   return 0;
 }
-void X64Emitter::CallExtern(const hir::Instr* instr,
-                            const FunctionInfo* symbol_info) {
-  if (symbol_info->behavior() == FunctionBehavior::kBuiltin &&
-      symbol_info->builtin_handler()) {
-    // rcx = context
-    // rdx = target host function
-    // r8  = arg0
-    // r9  = arg1
-    mov(rdx, reinterpret_cast<uint64_t>(symbol_info->builtin_handler()));
-    mov(r8, reinterpret_cast<uint64_t>(symbol_info->builtin_arg0()));
-    mov(r9, reinterpret_cast<uint64_t>(symbol_info->builtin_arg1()));
-    auto thunk = backend()->guest_to_host_thunk();
-    mov(rax, reinterpret_cast<uint64_t>(thunk));
-    call(rax);
-    ReloadECX();
-    ReloadEDX();
-    // rax = host return
-  } else if (symbol_info->behavior() == FunctionBehavior::kExtern &&
-             symbol_info->extern_handler()) {
-    // rcx = context
-    // rdx = target host function
-    mov(rdx, reinterpret_cast<uint64_t>(symbol_info->extern_handler()));
-    mov(r8, qword[rcx + offsetof(cpu::frontend::PPCContext, kernel_state)]);
-    auto thunk = backend()->guest_to_host_thunk();
-    mov(rax, reinterpret_cast<uint64_t>(thunk));
-    call(rax);
-    ReloadECX();
-    ReloadEDX();
-    // rax = host return
-  } else {
-    CallNative(UndefinedCallExtern, reinterpret_cast<uint64_t>(symbol_info));
+void X64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
+  bool undefined = true;
+  if (function->behavior() == Function::Behavior::kBuiltin) {
+    auto builtin_function = static_cast<const BuiltinFunction*>(function);
+    if (builtin_function->handler()) {
+      undefined = false;
+      // rcx = context
+      // rdx = target host function
+      // r8  = arg0
+      // r9  = arg1
+      mov(rdx, reinterpret_cast<uint64_t>(builtin_function->handler()));
+      mov(r8, reinterpret_cast<uint64_t>(builtin_function->arg0()));
+      mov(r9, reinterpret_cast<uint64_t>(builtin_function->arg1()));
+      auto thunk = backend()->guest_to_host_thunk();
+      mov(rax, reinterpret_cast<uint64_t>(thunk));
+      call(rax);
+      ReloadECX();
+      ReloadEDX();
+      // rax = host return
+    }
+  } else if (function->behavior() == Function::Behavior::kExtern) {
+    auto extern_function = static_cast<const GuestFunction*>(function);
+    if (extern_function->extern_handler()) {
+      undefined = false;
+      // rcx = context
+      // rdx = target host function
+      mov(rdx, reinterpret_cast<uint64_t>(extern_function->extern_handler()));
+      mov(r8, qword[rcx + offsetof(ppc::PPCContext, kernel_state)]);
+      auto thunk = backend()->guest_to_host_thunk();
+      mov(rax, reinterpret_cast<uint64_t>(thunk));
+      call(rax);
+      ReloadECX();
+      ReloadEDX();
+      // rax = host return
+    }
+  }
+  if (undefined) {
+    CallNative(UndefinedCallExtern, reinterpret_cast<uint64_t>(function));
   }
 }
 
@@ -505,7 +542,8 @@ void X64Emitter::CallNativeSafe(void* fn) {
 }
 
 void X64Emitter::SetReturnAddress(uint64_t value) {
-  mov(qword[rsp + StackLayout::GUEST_CALL_RET_ADDR], value);
+  mov(rax, value);
+  mov(qword[rsp + StackLayout::GUEST_CALL_RET_ADDR], rax);
 }
 
 void X64Emitter::ReloadECX() {
@@ -533,25 +571,6 @@ void X64Emitter::nop(size_t length) {
   }
 }
 
-void X64Emitter::LoadEflags() {
-#if STORE_EFLAGS
-  mov(eax, dword[rsp + STASH_OFFSET]);
-  btr(eax, 0);
-#else
-// EFLAGS already present.
-#endif  // STORE_EFLAGS
-}
-
-void X64Emitter::StoreEflags() {
-#if STORE_EFLAGS
-  pushf();
-  pop(dword[rsp + STASH_OFFSET]);
-#else
-// EFLAGS should have CA set?
-// (so long as we don't fuck with it)
-#endif  // STORE_EFLAGS
-}
-
 bool X64Emitter::ConstantFitsIn32Reg(uint64_t v) {
   if ((v & ~0x7FFFFFFF) == 0) {
     // Fits under 31 bits, so just load using normal mov.
@@ -563,7 +582,7 @@ bool X64Emitter::ConstantFitsIn32Reg(uint64_t v) {
   return false;
 }
 
-void X64Emitter::MovMem64(const RegExp& addr, uint64_t v) {
+void X64Emitter::MovMem64(const Xbyak::RegExp& addr, uint64_t v) {
   if ((v & ~0x7FFFFFFF) == 0) {
     // Fits under 31 bits, so just load using normal mov.
     mov(qword[addr], v);
@@ -583,7 +602,7 @@ void X64Emitter::MovMem64(const RegExp& addr, uint64_t v) {
   }
 }
 
-Address X64Emitter::GetXmmConstPtr(XmmConst id) {
+uint32_t X64Emitter::PlaceData(Memory* memory) {
   static const vec128_t xmm_consts[] = {
       /* XMMZero                */ vec128f(0.0f),
       /* XMMOne                 */ vec128f(1.0f),
@@ -659,12 +678,14 @@ Address X64Emitter::GetXmmConstPtr(XmmConst id) {
       /* XMMShortMinPS          */ vec128f(SHRT_MIN),
       /* XMMShortMaxPS          */ vec128f(SHRT_MAX),
   };
-  // TODO(benvanik): cache base pointer somewhere? stack? It'd be nice to
-  // prevent this move.
-  // TODO(benvanik): move to predictable location in PPCContext? could then
-  // just do rcx relative addression with no rax overwriting.
-  mov(rax, (uint64_t)&xmm_consts[id]);
-  return ptr[rax];
+  uint32_t ptr = memory->SystemHeapAlloc(sizeof(xmm_consts));
+  std::memcpy(memory->TranslateVirtual(ptr), xmm_consts, sizeof(xmm_consts));
+  return ptr;
+}
+
+Xbyak::Address X64Emitter::GetXmmConstPtr(XmmConst id) {
+  // Load through fixed constant table setup by PlaceData.
+  return ptr[rdx + backend_->emitter_data() + sizeof(vec128_t) * id];
 }
 
 void X64Emitter::LoadConstantXmm(Xbyak::Xmm dest, const vec128_t& v) {
@@ -679,9 +700,9 @@ void X64Emitter::LoadConstantXmm(Xbyak::Xmm dest, const vec128_t& v) {
   } else {
     // TODO(benvanik): see what other common values are.
     // TODO(benvanik): build constant table - 99% are reused.
-    MovMem64(rsp + STASH_OFFSET, v.low);
-    MovMem64(rsp + STASH_OFFSET + 8, v.high);
-    vmovdqa(dest, ptr[rsp + STASH_OFFSET]);
+    MovMem64(rsp + kStashOffset, v.low);
+    MovMem64(rsp + kStashOffset + 8, v.high);
+    vmovdqa(dest, ptr[rsp + kStashOffset]);
   }
 }
 
@@ -723,8 +744,8 @@ void X64Emitter::LoadConstantXmm(Xbyak::Xmm dest, double v) {
   }
 }
 
-Address X64Emitter::StashXmm(int index, const Xmm& r) {
-  auto addr = ptr[rsp + STASH_OFFSET + (index * 16)];
+Xbyak::Address X64Emitter::StashXmm(int index, const Xbyak::Xmm& r) {
+  auto addr = ptr[rsp + kStashOffset + (index * 16)];
   vmovups(addr, r);
   return addr;
 }

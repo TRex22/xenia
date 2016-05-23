@@ -12,14 +12,12 @@
 
 #include <string>
 
-#include "xenia/gpu/gl4/gl_context.h"
 #include "xenia/gpu/shader.h"
+#include "xenia/ui/gl/gl_context.h"
 
 namespace xe {
 namespace gpu {
 namespace gl4 {
-
-class GL4ShaderTranslator;
 
 class GL4Shader : public Shader {
  public:
@@ -28,21 +26,25 @@ class GL4Shader : public Shader {
   ~GL4Shader() override;
 
   GLuint program() const { return program_; }
+  GLuint shader() const { return shader_; }
   GLuint vao() const { return vao_; }
 
-  bool PrepareVertexShader(GL4ShaderTranslator* shader_translator,
-                           const xenos::xe_gpu_program_cntl_t& program_cntl);
-  bool PreparePixelShader(GL4ShaderTranslator* shader_translator,
-                          const xenos::xe_gpu_program_cntl_t& program_cntl);
+  bool Prepare();
+  bool LoadFromBinary(const uint8_t* blob, GLenum binary_format, size_t length);
+  std::vector<uint8_t> GetBinary(GLenum* binary_format = nullptr);
 
  protected:
-  std::string GetHeader();
-  std::string GetFooter();
   bool PrepareVertexArrayObject();
-  bool CompileProgram(std::string source);
+  bool CompileShader();
+  bool LinkProgram();
 
-  GLuint program_;
-  GLuint vao_;
+  std::string GetShaderInfoLog();
+  std::string GetProgramInfoLog();
+  static std::string GetHostDisasmNV(const std::vector<uint8_t>& binary);
+
+  GLuint program_ = 0;
+  GLuint shader_ = 0;
+  GLuint vao_ = 0;
 };
 
 }  // namespace gl4

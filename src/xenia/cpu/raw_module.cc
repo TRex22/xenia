@@ -9,8 +9,11 @@
 
 #include "xenia/cpu/raw_module.h"
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
+#include "xenia/cpu/function.h"
+#include "xenia/cpu/processor.h"
 
 namespace xe {
 namespace cpu {
@@ -21,8 +24,8 @@ RawModule::RawModule(Processor* processor)
 RawModule::~RawModule() {}
 
 bool RawModule::LoadFile(uint32_t base_address, const std::wstring& path) {
-  auto fixed_path = xe::to_string(xe::fix_path_separators(path));
-  FILE* file = fopen(fixed_path.c_str(), "rb");
+  auto fixed_path = xe::fix_path_separators(path);
+  FILE* file = xe::filesystem::OpenFile(fixed_path, "rb");
   fseek(file, 0, SEEK_END);
   uint32_t file_length = static_cast<uint32_t>(ftell(file));
   fseek(file, 0, SEEK_SET);
@@ -42,21 +45,38 @@ bool RawModule::LoadFile(uint32_t base_address, const std::wstring& path) {
   fclose(file);
 
   // Setup debug info.
-  auto last_slash = fixed_path.find_last_of(xe::path_separator);
+  auto last_slash = fixed_path.find_last_of(xe::kPathSeparator);
   if (last_slash != std::string::npos) {
-    name_ = fixed_path.substr(last_slash + 1);
+    name_ = xe::to_string(fixed_path.substr(last_slash + 1));
   } else {
-    name_ = fixed_path;
+    name_ = xe::to_string(fixed_path);
   }
   // TODO(benvanik): debug info
 
   low_address_ = base_address;
   high_address_ = base_address + file_length;
+
+  // Notify backend about executable code.
+  processor_->backend()->CommitExecutableRange(low_address_, high_address_);
   return true;
+}
+
+void RawModule::SetAddressRange(uint32_t base_address, uint32_t size) {
+  base_address_ = base_address;
+  low_address_ = base_address;
+  high_address_ = base_address + size;
+
+  // Notify backend about executable code.
+  processor_->backend()->CommitExecutableRange(low_address_, high_address_);
 }
 
 bool RawModule::ContainsAddress(uint32_t address) {
   return address >= low_address_ && address < high_address_;
+}
+
+std::unique_ptr<Function> RawModule::CreateFunction(uint32_t address) {
+  return std::unique_ptr<Function>(
+      processor_->backend()->CreateGuestFunction(this, address));
 }
 
 }  // namespace cpu

@@ -1,0 +1,48 @@
+# Make Travis use docker (for faster builds, in theory).
+# TODO(benvanik): re-enable when clang-3.8 is whitelisted.
+# https://github.com/travis-ci/apt-package-whitelist/issues/474
+#sudo: false
+
+language: cpp
+compiler:
+  - clang
+  # - gcc
+
+os:
+  - linux
+  # - osx
+
+sudo: false
+addons:
+  apt:
+    sources:
+      - ubuntu-toolchain-r-test
+      - llvm-toolchain-precise
+    packages:
+      - clang-3.8
+      - clang-format-3.8
+
+git:
+  # We handle submodules ourselves in xenia-build setup.
+  submodules: false
+
+before_script:
+  # Dump useful info.
+  - $CXX --version
+  # Prepare environment (pull dependencies, build tools).
+  - travis_retry ./xenia-build setup
+
+script:
+  # Run linter.
+  - ./xenia-build lint --all
+  # Run style checker.
+  #- ./xenia-build style
+  # Build and run our simple hello world test.
+  - ./xenia-build build --config=debug --target=xenia-base-tests
+  - ./build/bin/Linux/Debug/xenia-base-tests
+  # Build all of xenia.
+  #- ./xenia-build build --config=debug
+  # All tests (without haswell support).
+  #- ./xenia-build test --config=debug --no-build -- --enable_haswell_instructions=false
+  # All tests (with haswell support).
+  #- ./xenia-build test --config=debug --no-build -- --enable_haswell_instructions=true

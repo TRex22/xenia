@@ -9,21 +9,19 @@
 
 #include "xenia/gpu/gl4/texture_cache.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
-#include "xenia/gpu/gpu-private.h"
-#include "xenia/profiling.h"
+#include "xenia/base/profiling.h"
+#include "xenia/gpu/gpu_flags.h"
 
 namespace xe {
 namespace gpu {
 namespace gl4 {
-
-using namespace xe::gpu::xenos;
-
-extern "C" GLEWContext* glewGetContext();
-extern "C" WGLEWContext* wglewGetContext();
 
 struct TextureConfig {
   TextureFormat texture_format;
@@ -42,9 +40,9 @@ static const TextureConfig texture_configs[64] = {
     {TextureFormat::k_8, GL_R8, GL_RED, GL_UNSIGNED_BYTE},
     {TextureFormat::k_1_5_5_5, GL_RGB5_A1, GL_RGBA,
      GL_UNSIGNED_SHORT_1_5_5_5_REV},
-    {TextureFormat::k_5_6_5, GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5},
+    {TextureFormat::k_5_6_5, GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV},
     {TextureFormat::k_6_5_5, GL_INVALID_ENUM, GL_INVALID_ENUM, GL_INVALID_ENUM},
-    {TextureFormat::k_8_8_8_8, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE},
+    {TextureFormat::k_8_8_8_8, GL_RGBA8, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV},
     {TextureFormat::k_2_10_10_10, GL_RGB10_A2, GL_RGBA,
      GL_UNSIGNED_INT_2_10_10_10_REV},
     {TextureFormat::k_8_A, GL_INVALID_ENUM, GL_INVALID_ENUM, GL_INVALID_ENUM},
@@ -64,8 +62,8 @@ static const TextureConfig texture_configs[64] = {
      GL_UNSIGNED_INT_10F_11F_11F_REV},  // ?
     {TextureFormat::k_11_11_10, GL_R11F_G11F_B10F, GL_RGB,
      GL_UNSIGNED_INT_10F_11F_11F_REV},  // ?
-    {TextureFormat::k_DXT1, GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
-     GL_COMPRESSED_RGB_S3TC_DXT1_EXT, GL_UNSIGNED_BYTE},
+    {TextureFormat::k_DXT1, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+     GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, GL_UNSIGNED_BYTE},
     {TextureFormat::k_DXT2_3, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
      GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, GL_UNSIGNED_BYTE},
     {TextureFormat::k_DXT4_5, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT,
@@ -86,10 +84,9 @@ static const TextureConfig texture_configs[64] = {
     {TextureFormat::k_16_FLOAT, GL_R16F, GL_RED, GL_HALF_FLOAT},
     {TextureFormat::k_16_16_FLOAT, GL_RG16F, GL_RG, GL_HALF_FLOAT},
     {TextureFormat::k_16_16_16_16_FLOAT, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},
-    {TextureFormat::k_32, GL_INVALID_ENUM, GL_INVALID_ENUM, GL_INVALID_ENUM},
-    {TextureFormat::k_32_32, GL_INVALID_ENUM, GL_INVALID_ENUM, GL_INVALID_ENUM},
-    {TextureFormat::k_32_32_32_32, GL_INVALID_ENUM, GL_INVALID_ENUM,
-     GL_INVALID_ENUM},
+    {TextureFormat::k_32, GL_R32I, GL_RED, GL_UNSIGNED_INT},
+    {TextureFormat::k_32_32, GL_RG32I, GL_RG, GL_UNSIGNED_INT},
+    {TextureFormat::k_32_32_32_32, GL_RGBA32I, GL_RGBA, GL_UNSIGNED_INT},
     {TextureFormat::k_32_FLOAT, GL_R32F, GL_RED, GL_FLOAT},
     {TextureFormat::k_32_32_FLOAT, GL_RG32F, GL_RG, GL_FLOAT},
     {TextureFormat::k_32_32_32_32_FLOAT, GL_RGBA32F, GL_RGBA, GL_FLOAT},
@@ -130,7 +127,8 @@ static const TextureConfig texture_configs[64] = {
     {TextureFormat::k_11_11_10_AS_16_16_16_16, GL_R11F_G11F_B10F,
      GL_INVALID_ENUM, GL_INVALID_ENUM},
     {TextureFormat::k_32_32_32_FLOAT, GL_RGB32F, GL_RGB, GL_FLOAT},
-    {TextureFormat::k_DXT3A, GL_INVALID_ENUM, GL_INVALID_ENUM, GL_INVALID_ENUM},
+    {TextureFormat::k_DXT3A, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
+     GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, GL_UNSIGNED_BYTE},
     {TextureFormat::k_DXT5A, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT,
      GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, GL_UNSIGNED_BYTE},
     {TextureFormat::k_CTX1, GL_INVALID_ENUM, GL_INVALID_ENUM, GL_INVALID_ENUM},
@@ -196,7 +194,7 @@ void TextureCache::EvictAllTextures() {
   }
 
   {
-    std::lock_guard<xe::mutex> lock(invalidated_textures_mutex_);
+    std::lock_guard<std::mutex> lock(invalidated_textures_mutex_);
     invalidated_textures_sets_[0].clear();
     invalidated_textures_sets_[1].clear();
   }
@@ -296,25 +294,25 @@ TextureCache::SamplerEntry* TextureCache::LookupOrInsertSampler(
       GL_MIRROR_CLAMP_TO_BORDER_EXT,  //
   };
   glSamplerParameteri(entry->handle, GL_TEXTURE_WRAP_S,
-                      wrap_map[sampler_info.clamp_u]);
+                      wrap_map[static_cast<int>(sampler_info.clamp_u)]);
   glSamplerParameteri(entry->handle, GL_TEXTURE_WRAP_T,
-                      wrap_map[sampler_info.clamp_v]);
+                      wrap_map[static_cast<int>(sampler_info.clamp_v)]);
   glSamplerParameteri(entry->handle, GL_TEXTURE_WRAP_R,
-                      wrap_map[sampler_info.clamp_w]);
+                      wrap_map[static_cast<int>(sampler_info.clamp_w)]);
 
   // Texture level filtering.
   GLenum min_filter;
   switch (sampler_info.min_filter) {
-    case ucode::TEX_FILTER_POINT:
+    case TextureFilter::kPoint:
       switch (sampler_info.mip_filter) {
-        case ucode::TEX_FILTER_BASEMAP:
+        case TextureFilter::kBaseMap:
           min_filter = GL_NEAREST;
           break;
-        case ucode::TEX_FILTER_POINT:
+        case TextureFilter::kPoint:
           // min_filter = GL_NEAREST_MIPMAP_NEAREST;
           min_filter = GL_NEAREST;
           break;
-        case ucode::TEX_FILTER_LINEAR:
+        case TextureFilter::kLinear:
           // min_filter = GL_NEAREST_MIPMAP_LINEAR;
           min_filter = GL_NEAREST;
           break;
@@ -323,16 +321,16 @@ TextureCache::SamplerEntry* TextureCache::LookupOrInsertSampler(
           return nullptr;
       }
       break;
-    case ucode::TEX_FILTER_LINEAR:
+    case TextureFilter::kLinear:
       switch (sampler_info.mip_filter) {
-        case ucode::TEX_FILTER_BASEMAP:
+        case TextureFilter::kBaseMap:
           min_filter = GL_LINEAR;
           break;
-        case ucode::TEX_FILTER_POINT:
+        case TextureFilter::kPoint:
           // min_filter = GL_LINEAR_MIPMAP_NEAREST;
           min_filter = GL_LINEAR;
           break;
-        case ucode::TEX_FILTER_LINEAR:
+        case TextureFilter::kLinear:
           // min_filter = GL_LINEAR_MIPMAP_LINEAR;
           min_filter = GL_LINEAR;
           break;
@@ -347,10 +345,10 @@ TextureCache::SamplerEntry* TextureCache::LookupOrInsertSampler(
   }
   GLenum mag_filter;
   switch (sampler_info.mag_filter) {
-    case ucode::TEX_FILTER_POINT:
+    case TextureFilter::kPoint:
       mag_filter = GL_NEAREST;
       break;
-    case ucode::TEX_FILTER_LINEAR:
+    case TextureFilter::kLinear:
       mag_filter = GL_LINEAR;
       break;
     default:
@@ -360,8 +358,34 @@ TextureCache::SamplerEntry* TextureCache::LookupOrInsertSampler(
   glSamplerParameteri(entry->handle, GL_TEXTURE_MIN_FILTER, min_filter);
   glSamplerParameteri(entry->handle, GL_TEXTURE_MAG_FILTER, mag_filter);
 
-  // TODO(benvanik): anisotropic filtering.
-  // GL_TEXTURE_MAX_ANISOTROPY_EXT
+  GLfloat aniso;
+  switch (sampler_info.aniso_filter) {
+    case AnisoFilter::kDisabled:
+      aniso = 0.0f;
+      break;
+    case AnisoFilter::kMax_1_1:
+      aniso = 1.0f;
+      break;
+    case AnisoFilter::kMax_2_1:
+      aniso = 2.0f;
+      break;
+    case AnisoFilter::kMax_4_1:
+      aniso = 4.0f;
+      break;
+    case AnisoFilter::kMax_8_1:
+      aniso = 8.0f;
+      break;
+    case AnisoFilter::kMax_16_1:
+      aniso = 16.0f;
+      break;
+    default:
+      assert_unhandled_case(aniso);
+      return nullptr;
+  }
+
+  if (aniso) {
+    glSamplerParameterf(entry->handle, GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso);
+  }
 
   // Add to map - map takes ownership.
   auto entry_ptr = entry.get();
@@ -449,25 +473,6 @@ TextureCache::TextureEntry* TextureCache::LookupOrInsertTexture(
   glTextureParameteri(entry->handle, GL_TEXTURE_BASE_LEVEL, 0);
   glTextureParameteri(entry->handle, GL_TEXTURE_MAX_LEVEL, 1);
 
-  // Pre-shader swizzle.
-  // TODO(benvanik): can this be dynamic? Maybe per view?
-  // We may have to emulate this in the shader.
-  uint32_t swizzle_r = texture_info.swizzle & 0x7;
-  uint32_t swizzle_g = (texture_info.swizzle >> 3) & 0x7;
-  uint32_t swizzle_b = (texture_info.swizzle >> 6) & 0x7;
-  uint32_t swizzle_a = (texture_info.swizzle >> 9) & 0x7;
-  static const GLenum swizzle_map[] = {
-      GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE,
-  };
-  glTextureParameteri(entry->handle, GL_TEXTURE_SWIZZLE_R,
-                      swizzle_map[swizzle_r]);
-  glTextureParameteri(entry->handle, GL_TEXTURE_SWIZZLE_G,
-                      swizzle_map[swizzle_g]);
-  glTextureParameteri(entry->handle, GL_TEXTURE_SWIZZLE_B,
-                      swizzle_map[swizzle_b]);
-  glTextureParameteri(entry->handle, GL_TEXTURE_SWIZZLE_A,
-                      swizzle_map[swizzle_a]);
-
   // Upload/convert.
   bool uploaded = false;
   switch (texture_info.dimension) {
@@ -480,7 +485,7 @@ TextureCache::TextureEntry* TextureCache::LookupOrInsertTexture(
     case Dimension::k1D:
     case Dimension::k3D:
       assert_unhandled_case(texture_info.dimension);
-      return false;
+      return nullptr;
   }
   if (!uploaded) {
     XELOGE("Failed to convert/upload texture");
@@ -566,14 +571,18 @@ GLuint TextureCache::ConvertTexture(Blitter* blitter, uint32_t guest_address,
                                 dest_rect);
     } else {
       blitter->CopyColorTexture2D(src_texture, src_rect, texture_entry->handle,
-                                  dest_rect, GL_LINEAR);
+                                  dest_rect, GL_LINEAR, swap_channels);
     }
 
     // HACK: remove texture from write watch list so readback won't kill us.
+    // Not needed now, as readback is disabled.
+    /*
     if (texture_entry->write_watch_handle) {
       memory_->CancelWriteWatch(texture_entry->write_watch_handle);
       texture_entry->write_watch_handle = 0;
     }
+    //*/
+
     return texture_entry->handle;
   }
 
@@ -591,7 +600,7 @@ GLuint TextureCache::ConvertTexture(Blitter* blitter, uint32_t guest_address,
                                   dest_rect);
       } else {
         blitter->CopyColorTexture2D(src_texture, src_rect, entry->handle,
-                                    dest_rect, GL_LINEAR);
+                                    dest_rect, GL_LINEAR, swap_channels);
       }
       return entry->handle;
     }
@@ -618,7 +627,7 @@ GLuint TextureCache::ConvertTexture(Blitter* blitter, uint32_t guest_address,
     blitter->CopyDepthTexture(src_texture, src_rect, entry->handle, dest_rect);
   } else {
     blitter->CopyColorTexture2D(src_texture, src_rect, entry->handle, dest_rect,
-                                GL_LINEAR);
+                                GL_LINEAR, swap_channels);
   }
 
   GLuint handle = entry->handle;
@@ -662,13 +671,10 @@ void TextureSwap(Endian endianness, void* dest, const void* src,
                                    reinterpret_cast<const uint32_t*>(src),
                                    length / 4);
       break;
-    case Endian::k16in32:
-      // TODO(benvanik): make more efficient.
-      /*for (uint32_t i = 0; i < length; i += 4, src += 4, dest += 4) {
-        uint32_t value = *(uint32_t*)src;
-        *(uint32_t*)dest = ((value >> 16) & 0xFFFF) | (value << 16);
-      }*/
-      assert_always("16in32 not supported");
+    case Endian::k16in32:  // Swap high and low 16 bits within a 32 bit word
+      xe::copy_and_swap_16_in_32_aligned(reinterpret_cast<uint32_t*>(dest),
+                                         reinterpret_cast<const uint32_t*>(src),
+                                         length);
       break;
     default:
     case Endian::kUnspecified:

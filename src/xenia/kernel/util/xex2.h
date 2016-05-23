@@ -13,6 +13,8 @@
 #include "xenia/kernel/util/xex2_info.h"
 #include "xenia/memory.h"
 
+namespace xe {}  // namespace xe
+
 typedef struct { int reserved; } xe_xex2_options_t;
 
 struct xe_xex2;
@@ -24,7 +26,7 @@ typedef struct {
   uint32_t thunk_address;  // NULL or address of thunk
 } xe_xex2_import_info_t;
 
-enum xe_pe_section_flags_e {
+enum xe_pe_section_flags_e : uint32_t {
   kXEPESectionContainsCode = 0x00000020,
   kXEPESectionContainsDataInit = 0x00000040,
   kXEPESectionContainsDataUninit = 0x00000080,

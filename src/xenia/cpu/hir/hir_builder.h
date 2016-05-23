@@ -7,8 +7,8 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_HIR_HIR_BUILDER_H_
-#define XENIA_HIR_HIR_BUILDER_H_
+#ifndef XENIA_CPU_HIR_HIR_BUILDER_H_
+#define XENIA_CPU_HIR_HIR_BUILDER_H_
 
 #include <vector>
 
@@ -83,20 +83,19 @@ class HIRBuilder {
   void Trap(uint16_t trap_code = 0);
   void TrapTrue(Value* cond, uint16_t trap_code = 0);
 
-  void Call(FunctionInfo* symbol_info, uint32_t call_flags = 0);
-  void CallTrue(Value* cond, FunctionInfo* symbol_info,
-                uint32_t call_flags = 0);
-  void CallIndirect(Value* value, uint32_t call_flags = 0);
-  void CallIndirectTrue(Value* cond, Value* value, uint32_t call_flags = 0);
-  void CallExtern(FunctionInfo* symbol_info);
+  void Call(Function* symbol, uint16_t call_flags = 0);
+  void CallTrue(Value* cond, Function* symbol, uint16_t call_flags = 0);
+  void CallIndirect(Value* value, uint16_t call_flags = 0);
+  void CallIndirectTrue(Value* cond, Value* value, uint16_t call_flags = 0);
+  void CallExtern(Function* symbol);
   void Return();
   void ReturnTrue(Value* cond);
   void SetReturnAddress(Value* value);
 
-  void Branch(Label* label, uint32_t branch_flags = 0);
-  void Branch(Block* block, uint32_t branch_flags = 0);
-  void BranchTrue(Value* cond, Label* label, uint32_t branch_flags = 0);
-  void BranchFalse(Value* cond, Label* label, uint32_t branch_flags = 0);
+  void Branch(Label* label, uint16_t branch_flags = 0);
+  void Branch(Block* block, uint16_t branch_flags = 0);
+  void BranchTrue(Value* cond, Label* label, uint16_t branch_flags = 0);
+  void BranchFalse(Value* cond, Label* label, uint16_t branch_flags = 0);
 
   // phi type_name, Block* b1, Value* v1, Block* b2, Value* v2, etc
 
@@ -112,17 +111,25 @@ class HIRBuilder {
   Value* VectorConvertF2I(Value* value, uint32_t arithmetic_flags = 0);
 
   Value* LoadZero(TypeName type);
-  Value* LoadConstant(int8_t value);
-  Value* LoadConstant(uint8_t value);
-  Value* LoadConstant(int16_t value);
-  Value* LoadConstant(uint16_t value);
-  Value* LoadConstant(int32_t value);
-  Value* LoadConstant(uint32_t value);
-  Value* LoadConstant(int64_t value);
-  Value* LoadConstant(uint64_t value);
-  Value* LoadConstant(float value);
-  Value* LoadConstant(double value);
-  Value* LoadConstant(const vec128_t& value);
+  Value* LoadZeroInt8() { return LoadZero(INT8_TYPE); }
+  Value* LoadZeroInt16() { return LoadZero(INT16_TYPE); }
+  Value* LoadZeroInt32() { return LoadZero(INT32_TYPE); }
+  Value* LoadZeroInt64() { return LoadZero(INT64_TYPE); }
+  Value* LoadZeroFloat32() { return LoadZero(FLOAT32_TYPE); }
+  Value* LoadZeroFloat64() { return LoadZero(FLOAT64_TYPE); }
+  Value* LoadZeroVec128() { return LoadZero(VEC128_TYPE); }
+
+  Value* LoadConstantInt8(int8_t value);
+  Value* LoadConstantUint8(uint8_t value);
+  Value* LoadConstantInt16(int16_t value);
+  Value* LoadConstantUint16(uint16_t value);
+  Value* LoadConstantInt32(int32_t value);
+  Value* LoadConstantUint32(uint32_t value);
+  Value* LoadConstantInt64(int64_t value);
+  Value* LoadConstantUint64(uint64_t value);
+  Value* LoadConstantFloat32(float value);
+  Value* LoadConstantFloat64(double value);
+  Value* LoadConstantVec128(const vec128_t& value);
 
   Value* LoadVectorShl(Value* sh);
   Value* LoadVectorShr(Value* sh);
@@ -135,6 +142,7 @@ class HIRBuilder {
 
   Value* LoadContext(size_t offset, TypeName type);
   void StoreContext(size_t offset, Value* value);
+  void ContextBarrier();
 
   Value* LoadMmio(cpu::MMIORange* mmio_range, uint32_t address, TypeName type);
   void StoreMmio(cpu::MMIORange* mmio_range, uint32_t address, Value* value);
@@ -143,6 +151,7 @@ class HIRBuilder {
   void Store(Value* address, Value* value, uint32_t store_flags = 0);
   void Memset(Value* address, Value* value, Value* length);
   void Prefetch(Value* address, size_t length, uint32_t prefetch_flags = 0);
+  void MemoryBarrier();
 
   Value* Max(Value* value1, Value* value2);
   Value* VectorMax(Value* value1, Value* value2, TypeName part_type,
@@ -226,9 +235,9 @@ class HIRBuilder {
   Value* Pack(Value* value1, Value* value2, uint32_t pack_flags = 0);
   Value* Unpack(Value* value, uint32_t pack_flags = 0);
 
-  Value* CompareExchange(Value* address, Value* compare_value,
-                         Value* exchange_value);
   Value* AtomicExchange(Value* address, Value* new_value);
+  Value* AtomicCompareExchange(Value* address, Value* old_value,
+                               Value* new_value);
   Value* AtomicAdd(Value* address, Value* value);
   Value* AtomicSub(Value* address, Value* value);
 
@@ -267,4 +276,4 @@ class HIRBuilder {
 }  // namespace cpu
 }  // namespace xe
 
-#endif  // XENIA_HIR_HIR_BUILDER_H_
+#endif  // XENIA_CPU_HIR_HIR_BUILDER_H_

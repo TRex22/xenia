@@ -9,24 +9,18 @@
 
 #include "xenia/hid/input_system.h"
 
-#include "xenia/emulator.h"
-#include "xenia/cpu/processor.h"
+#include "xenia/base/profiling.h"
+#include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_driver.h"
-#include "xenia/profiling.h"
 
 namespace xe {
 namespace hid {
 
-InputSystem::InputSystem(Emulator* emulator)
-    : emulator_(emulator), memory_(emulator->memory()) {}
+InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {}
 
 InputSystem::~InputSystem() = default;
 
-X_STATUS InputSystem::Setup() {
-  processor_ = emulator_->processor();
-
-  return X_STATUS_SUCCESS;
-}
+X_STATUS InputSystem::Setup() { return X_STATUS_SUCCESS; }
 
 void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
   drivers_.push_back(std::move(driver));

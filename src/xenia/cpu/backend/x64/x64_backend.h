@@ -7,11 +7,20 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_BACKEND_X64_X64_BACKEND_H_
-#define XENIA_BACKEND_X64_X64_BACKEND_H_
+#ifndef XENIA_CPU_BACKEND_X64_X64_BACKEND_H_
+#define XENIA_CPU_BACKEND_X64_X64_BACKEND_H_
+
+#include <gflags/gflags.h>
+
+#include <memory>
 
 #include "xenia/cpu/backend/backend.h"
 
+DECLARE_bool(enable_haswell_instructions);
+
+namespace xe {
+class Exception;
+}  // namespace xe
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -27,14 +36,19 @@ typedef void (*ResolveFunctionThunk)();
 
 class X64Backend : public Backend {
  public:
-  const static uint32_t kForceReturnAddress = 0x9FFF0000u;
+  static const uint32_t kForceReturnAddress = 0x9FFF0000u;
 
-  X64Backend(Processor* processor);
+  explicit X64Backend(Processor* processor);
   ~X64Backend() override;
 
-  X64CodeCache* code_cache() const { return code_cache_; }
+  X64CodeCache* code_cache() const { return code_cache_.get(); }
+  uint32_t emitter_data() const { return emitter_data_; }
+
+  // Call a generated function, saving all stack parameters.
   HostToGuestThunk host_to_guest_thunk() const { return host_to_guest_thunk_; }
+  // Function that guest code can call to transition into host code.
   GuestToHostThunk guest_to_host_thunk() const { return guest_to_host_thunk_; }
+  // Function that thunks to the ResolveFunction in X64Emitter.
   ResolveFunctionThunk resolve_function_thunk() const {
     return resolve_function_thunk_;
   }
@@ -45,8 +59,25 @@ class X64Backend : public Backend {
 
   std::unique_ptr<Assembler> CreateAssembler() override;
 
+  std::unique_ptr<GuestFunction> CreateGuestFunction(Module* module,
+                                                     uint32_t address) override;
+
+  uint64_t CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
+                                        uint64_t current_pc) override;
+
+  void InstallBreakpoint(Breakpoint* breakpoint) override;
+  void InstallBreakpoint(Breakpoint* breakpoint, Function* fn) override;
+  void UninstallBreakpoint(Breakpoint* breakpoint) override;
+
  private:
-  X64CodeCache* code_cache_;
+  static bool ExceptionCallbackThunk(Exception* ex, void* data);
+  bool ExceptionCallback(Exception* ex);
+
+  uintptr_t capstone_handle_ = 0;
+
+  std::unique_ptr<X64CodeCache> code_cache_;
+
+  uint32_t emitter_data_;
 
   HostToGuestThunk host_to_guest_thunk_;
   GuestToHostThunk guest_to_host_thunk_;
@@ -58,4 +89,4 @@ class X64Backend : public Backend {
 }  // namespace cpu
 }  // namespace xe
 
-#endif  // XENIA_BACKEND_X64_X64_BACKEND_H_
+#endif  // XENIA_CPU_BACKEND_X64_X64_BACKEND_H_

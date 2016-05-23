@@ -9,16 +9,15 @@
 
 #include "xenia/hid/nop/nop_input_driver.h"
 
-#include "xenia/hid/hid-private.h"
+#include "xenia/hid/hid_flags.h"
 
 namespace xe {
 namespace hid {
 namespace nop {
 
-NopInputDriver::NopInputDriver(InputSystem* input_system)
-    : InputDriver(input_system) {}
+NopInputDriver::NopInputDriver(xe::ui::Window* window) : InputDriver(window) {}
 
-NopInputDriver::~NopInputDriver() {}
+NopInputDriver::~NopInputDriver() = default;
 
 X_STATUS NopInputDriver::Setup() { return X_STATUS_SUCCESS; }
 

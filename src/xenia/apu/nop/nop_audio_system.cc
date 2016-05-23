@@ -9,19 +9,29 @@
 
 #include "xenia/apu/nop/nop_audio_system.h"
 
-#include "xenia/apu/apu-private.h"
+#include "xenia/apu/apu_flags.h"
 
-using namespace xe;
-using namespace xe::apu;
-using namespace xe::apu::nop;
+namespace xe {
+namespace apu {
+namespace nop {
 
-NopAudioSystem::NopAudioSystem(Emulator* emulator) : AudioSystem(emulator) {}
+std::unique_ptr<AudioSystem> NopAudioSystem::Create(cpu::Processor* processor) {
+  return std::make_unique<NopAudioSystem>(processor);
+}
 
-NopAudioSystem::~NopAudioSystem() {}
+NopAudioSystem::NopAudioSystem(cpu::Processor* processor)
+    : AudioSystem(processor) {}
 
-X_STATUS NopAudioSystem::CreateDriver(size_t index, HANDLE wait_handle,
+NopAudioSystem::~NopAudioSystem() = default;
+
+X_STATUS NopAudioSystem::CreateDriver(size_t index,
+                                      xe::threading::Semaphore* semaphore,
                                       AudioDriver** out_driver) {
   return X_STATUS_NOT_IMPLEMENTED;
 }
 
 void NopAudioSystem::DestroyDriver(AudioDriver* driver) { assert_always(); }
+
+}  // namespace nop
+}  // namespace apu
+}  // namespace xe

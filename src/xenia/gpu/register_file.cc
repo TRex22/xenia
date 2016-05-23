@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/register_file.h"
 
+#include <cstring>
+
 #include "xenia/base/math.h"
 
 namespace xe {
@@ -24,13 +26,12 @@ const RegisterInfo* RegisterFile::GetRegisterInfo(uint32_t index) {
         RegisterInfo::Type::type, #name,   \
     };                                     \
     return &reg_info;                      \
-  \
-}
+  }
 #include "xenia/gpu/register_table.inc"
 #undef XE_GPU_REGISTER
     default:
       return nullptr;
-  };
+  }
 }
 
 }  //  namespace gpu

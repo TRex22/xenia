@@ -22,21 +22,31 @@ class MappedMemory {
     kReadWrite,
   };
 
-  virtual ~MappedMemory() = default;
-
   static std::unique_ptr<MappedMemory> Open(const std::wstring& path, Mode mode,
                                             size_t offset = 0,
                                             size_t length = 0);
 
+  MappedMemory(const std::wstring& path, Mode mode)
+      : path_(path), mode_(mode), data_(nullptr), size_(0) {}
+  MappedMemory(const std::wstring& path, Mode mode, void* data, size_t size)
+      : path_(path), mode_(mode), data_(data), size_(size) {}
+  virtual ~MappedMemory() = default;
+
+  std::unique_ptr<MappedMemory> Slice(Mode mode, size_t offset, size_t length) {
+    return std::make_unique<MappedMemory>(path_, mode, data() + offset, length);
+  }
+
   uint8_t* data() const { return reinterpret_cast<uint8_t*>(data_); }
   size_t size() const { return size_; }
 
-  virtual void Flush() = 0;
+  // Close, and optionally truncate file to size
+  virtual void Close(uint64_t truncate_size = 0) {}
+  virtual void Flush() {}
+
+  // Changes the offset inside the file. This will update data() and size()!
+  virtual bool Remap(size_t offset, size_t length) { return false; }
 
  protected:
-  MappedMemory(const std::wstring& path, Mode mode)
-      : path_(path), mode_(mode), data_(nullptr), size_(0) {}
-
   std::wstring path_;
   Mode mode_;
   void* data_;

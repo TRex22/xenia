@@ -9,12 +9,12 @@
 
 #include "xenia/kernel/util/xex2.h"
 
-#include <algorithm>
-#include <vector>
-
 #include <gflags/gflags.h>
 
-#include "third_party/crypto/rijndael-alg-fst.h"
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
 #include "third_party/crypto/rijndael-alg-fst.c"
 #include "third_party/mspack/lzx.h"
 #include "third_party/mspack/lzxd.c"
@@ -26,67 +26,68 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 
-// TODO(benvanik): remove.
-#define XEEXPECTZERO(expr) \
-  if ((expr) != 0) {       \
-    goto XECLEANUP;        \
-  }
-#define XEEXPECTNOTNULL(expr) \
-  if ((expr) == NULL) {       \
-    goto XECLEANUP;           \
-  }
+namespace xe {}  // namespace xe
 
 DEFINE_bool(xex_dev_key, false, "Use the devkit key.");
 
 typedef struct xe_xex2 {
-  xe::Memory *memory;
+  xe::Memory* memory;
 
   xe_xex2_header_t header;
 
-  std::vector<PESection *> *sections;
+  std::vector<PESection*>* sections;
 
   struct {
     size_t count;
-    xe_xex2_import_info_t *infos;
+    xe_xex2_import_info_t* infos;
   } library_imports[16];
 } xe_xex2_t;
 
-int xe_xex2_read_header(const uint8_t *addr, const size_t length,
-                        xe_xex2_header_t *header);
-int xe_xex2_decrypt_key(xe_xex2_header_t *header);
-int xe_xex2_read_image(xe_xex2_ref xex, const uint8_t *xex_addr,
-                       const uint32_t xex_length, xe::Memory *memory);
+int xe_xex2_read_header(const uint8_t* addr, const size_t length,
+                        xe_xex2_header_t* header);
+int xe_xex2_decrypt_key(xe_xex2_header_t* header);
+int xe_xex2_read_image(xe_xex2_ref xex, const uint8_t* xex_addr,
+                       const uint32_t xex_length, xe::Memory* memory);
 int xe_xex2_load_pe(xe_xex2_ref xex);
 int xe_xex2_find_import_infos(xe_xex2_ref xex,
-                              const xe_xex2_import_library_t *library);
+                              const xe_xex2_import_library_t* library);
 
-xe_xex2_ref xe_xex2_load(xe::Memory *memory, const void *addr,
+xe_xex2_ref xe_xex2_load(xe::Memory* memory, const void* addr,
                          const size_t length, xe_xex2_options_t options) {
   xe_xex2_ref xex = (xe_xex2_ref)calloc(1, sizeof(xe_xex2));
 
   xex->memory = memory;
-  xex->sections = new std::vector<PESection *>();
+  xex->sections = new std::vector<PESection*>();
 
-  XEEXPECTZERO(
-      xe_xex2_read_header((const uint8_t *)addr, length, &xex->header));
+  if (xe_xex2_read_header((const uint8_t*)addr, length, &xex->header)) {
+    xe_xex2_dealloc(xex);
+    return nullptr;
+  }
 
-  XEEXPECTZERO(xe_xex2_decrypt_key(&xex->header));
+  if (xe_xex2_decrypt_key(&xex->header)) {
+    xe_xex2_dealloc(xex);
+    return nullptr;
+  }
 
-  XEEXPECTZERO(
-      xe_xex2_read_image(xex, (const uint8_t *)addr, uint32_t(length), memory));
+  if (xe_xex2_read_image(xex, (const uint8_t*)addr, uint32_t(length), memory)) {
+    xe_xex2_dealloc(xex);
+    return nullptr;
+  }
 
-  XEEXPECTZERO(xe_xex2_load_pe(xex));
+  if (xe_xex2_load_pe(xex)) {
+    xe_xex2_dealloc(xex);
+    return nullptr;
+  }
 
   for (size_t n = 0; n < xex->header.import_library_count; n++) {
     auto library = &xex->header.import_libraries[n];
-    XEEXPECTZERO(xe_xex2_find_import_infos(xex, library));
+    if (xe_xex2_find_import_infos(xex, library)) {
+      xe_xex2_dealloc(xex);
+      return nullptr;
+    }
   }
 
   return xex;
-
-XECLEANUP:
-  xe_xex2_dealloc(xex);
-  return nullptr;
 }
 
 void xe_xex2_dealloc(xe_xex2_ref xex) {
@@ -94,38 +95,38 @@ void xe_xex2_dealloc(xe_xex2_ref xex) {
     return;
   }
 
-  for (std::vector<PESection *>::iterator it = xex->sections->begin();
+  for (std::vector<PESection*>::iterator it = xex->sections->begin();
        it != xex->sections->end(); ++it) {
     delete *it;
   }
 
-  xe_xex2_header_t *header = &xex->header;
+  xe_xex2_header_t* header = &xex->header;
   free(header->sections);
   free(header->resource_infos);
   if (header->file_format_info.compression_type == XEX_COMPRESSION_BASIC) {
     free(header->file_format_info.compression_info.basic.blocks);
   }
   for (size_t n = 0; n < header->import_library_count; n++) {
-    xe_xex2_import_library_t *library = &header->import_libraries[n];
+    xe_xex2_import_library_t* library = &header->import_libraries[n];
     free(library->records);
   }
 
   xex->memory = NULL;
 }
 
-const xe_xex2_header_t *xe_xex2_get_header(xe_xex2_ref xex) {
+const xe_xex2_header_t* xe_xex2_get_header(xe_xex2_ref xex) {
   return &xex->header;
 }
 
-int xe_xex2_read_header(const uint8_t *addr, const size_t length,
-                        xe_xex2_header_t *header) {
-  const uint8_t *p = addr;
-  const uint8_t *pc;
-  const uint8_t *ps;
-  xe_xex2_loader_info_t *ldr;
+int xe_xex2_read_header(const uint8_t* addr, const size_t length,
+                        xe_xex2_header_t* header) {
+  const uint8_t* p = addr;
+  const uint8_t* pc;
+  const uint8_t* ps;
+  xe_xex2_loader_info_t* ldr;
 
   header->xex2 = xe::load_and_swap<uint32_t>(p + 0x00);
-  if (header->xex2 != 0x58455832) {
+  if (header->xex2 != 'XEX2') {
     return 1;
   }
 
@@ -137,11 +138,11 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
   header->header_count = xe::load_and_swap<uint32_t>(p + 0x14);
 
   for (size_t n = 0; n < header->header_count; n++) {
-    const uint8_t *ph = p + 0x18 + (n * 8);
+    const uint8_t* ph = p + 0x18 + (n * 8);
     const uint32_t key = xe::load_and_swap<uint32_t>(ph + 0x00);
     const uint32_t data_offset = xe::load_and_swap<uint32_t>(ph + 0x04);
 
-    xe_xex2_opt_header_t *opt_header = &header->headers[n];
+    xe_xex2_opt_header_t* opt_header = &header->headers[n];
     opt_header->key = key;
     switch (key & 0xFF) {
       case 0x01:
@@ -161,18 +162,18 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
         break;
     }
 
-    const uint8_t *pp = p + opt_header->offset;
+    const uint8_t* pp = p + opt_header->offset;
     switch (opt_header->key) {
       case XEX_HEADER_SYSTEM_FLAGS:
         header->system_flags = (xe_xex2_system_flags)data_offset;
         break;
       case XEX_HEADER_RESOURCE_INFO: {
         header->resource_info_count = (opt_header->length - 4) / 16;
-        header->resource_infos = (xe_xex2_resource_info_t *)calloc(
+        header->resource_infos = (xe_xex2_resource_info_t*)calloc(
             header->resource_info_count, sizeof(xe_xex2_resource_info_t));
-        const uint8_t *phi = pp + 0x04;
+        const uint8_t* phi = pp + 0x04;
         for (size_t m = 0; m < header->resource_info_count; m++) {
-          auto &res = header->resource_infos[m];
+          auto& res = header->resource_infos[m];
           memcpy(res.name, phi + 0x00, 8);
           res.address = xe::load_and_swap<uint32_t>(phi + 0x08);
           res.size = xe::load_and_swap<uint32_t>(phi + 0x0C);
@@ -180,7 +181,7 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
         }
       } break;
       case XEX_HEADER_EXECUTION_INFO: {
-        xe_xex2_execution_info_t *ex = &header->execution_info;
+        xe_xex2_execution_info_t* ex = &header->execution_info;
         ex->media_id = xe::load_and_swap<uint32_t>(pp + 0x00);
         ex->version.value = xe::load_and_swap<uint32_t>(pp + 0x04);
         ex->base_version.value = xe::load_and_swap<uint32_t>(pp + 0x08);
@@ -192,7 +193,7 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
         ex->savegame_id = xe::load_and_swap<uint32_t>(pp + 0x14);
       } break;
       case XEX_HEADER_GAME_RATINGS: {
-        xe_xex2_game_ratings_t *ratings = &header->game_ratings;
+        xe_xex2_game_ratings_t* ratings = &header->game_ratings;
         ratings->esrb =
             (xe_xex2_rating_esrb_value)xe::load_and_swap<uint8_t>(pp + 0x00);
         ratings->pegi =
@@ -219,7 +220,7 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
             (xe_xex2_rating_fpb_value)xe::load_and_swap<uint8_t>(pp + 0x0B);
       } break;
       case XEX_HEADER_TLS_INFO: {
-        xe_xex2_tls_info_t *tls = &header->tls_info;
+        xe_xex2_tls_info_t* tls = &header->tls_info;
         tls->slot_count = xe::load_and_swap<uint32_t>(pp + 0x00);
         tls->raw_data_address = xe::load_and_swap<uint32_t>(pp + 0x04);
         tls->data_size = xe::load_and_swap<uint32_t>(pp + 0x08);
@@ -243,56 +244,62 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
         // size = xe::load_and_swap<uint32_t>(pp + 0x04);
       } break;
       case XEX_HEADER_IMPORT_LIBRARIES: {
-        const size_t max_count = xe::countof(header->import_libraries);
-        size_t count = xe::load_and_swap<uint32_t>(pp + 0x08);
+        auto import_libraries =
+            reinterpret_cast<const xe::xex2_opt_import_libraries*>(pp);
+
+        const uint32_t max_count =
+            (uint32_t)xe::countof(header->import_libraries);
+        uint32_t count = import_libraries->library_count;
         assert_true(count <= max_count);
         if (count > max_count) {
           XELOGW("ignoring %zu extra entries in XEX_HEADER_IMPORT_LIBRARIES",
-                 (max_count - count));
+                 (max_count - import_libraries->library_count));
           count = max_count;
         }
         header->import_library_count = count;
 
-        uint32_t string_table_size = xe::load_and_swap<uint32_t>(pp + 0x04);
-        const char *string_table = (const char *)(pp + 0x0C);
+        uint32_t string_table_size = import_libraries->string_table_size;
+        const char* string_table[32];  // Pretend 32 is max_count
+        std::memset(string_table, 0, sizeof(string_table));
 
-        pp += 12 + string_table_size;
+        // Parse the string table
+        for (size_t i = 0, j = 0; i < string_table_size; j++) {
+          const char* str = import_libraries->string_table + i;
+
+          string_table[j] = str;
+          i += std::strlen(str) + 1;
+
+          // Padding
+          if ((i % 4) != 0) {
+            i += 4 - (i % 4);
+          }
+        }
+
+        pp += 12 + import_libraries->string_table_size;
         for (size_t m = 0; m < count; m++) {
-          xe_xex2_import_library_t *library = &header->import_libraries[m];
+          xe_xex2_import_library_t* library = &header->import_libraries[m];
+          auto src_library = (xe::xex2_import_library*)pp;
+
           memcpy(library->digest, pp + 0x04, 20);
-          library->import_id = xe::load_and_swap<uint32_t>(pp + 0x18);
-          library->version.value = xe::load_and_swap<uint32_t>(pp + 0x1C);
-          library->min_version.value = xe::load_and_swap<uint32_t>(pp + 0x20);
+          library->import_id = src_library->id;
+          library->version.value = src_library->version.value;
+          library->min_version.value = src_library->version_min.value;
 
-          const uint16_t name_index =
-              xe::load_and_swap<uint16_t>(pp + 0x24) & 0xFF;
-          for (size_t i = 0, j = 0; i < string_table_size;) {
-            assert_true(j <= 0xFF);
-            if (j == name_index) {
-              std::strncpy(library->name, string_table + i,
-                           xe::countof(library->name));
-              break;
-            }
-            if (string_table[i] == 0) {
-              i++;
-              if (i % 4) {
-                i += 4 - (i % 4);
-              }
-              j++;
-            } else {
-              i++;
-            }
-          }
+          std::strncpy(library->name,
+                       string_table[src_library->name_index & 0xFF],
+                       xe::countof(library->name));
 
-          library->record_count = xe::load_and_swap<uint16_t>(pp + 0x26);
+          library->record_count = src_library->count;
           library->records =
-              (uint32_t *)calloc(library->record_count, sizeof(uint32_t));
-          XEEXPECTNOTNULL(library->records);
-          pp += 0x28;
-          for (size_t i = 0; i < library->record_count; i++) {
-            library->records[i] = xe::load_and_swap<uint32_t>(pp);
-            pp += 4;
+              (uint32_t*)calloc(library->record_count, sizeof(uint32_t));
+          if (!library->records) {
+            return 1;
           }
+          for (size_t i = 0; i < library->record_count; i++) {
+            library->records[i] = src_library->import_table[i];
+          }
+
+          pp += src_library->size;
         }
       } break;
       case XEX_HEADER_STATIC_LIBRARIES: {
@@ -307,7 +314,7 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
         header->static_library_count = count;
         pp += 4;
         for (size_t m = 0; m < count; m++) {
-          xe_xex2_static_library_t *library = &header->static_libraries[m];
+          xe_xex2_static_library_t* library = &header->static_libraries[m];
           memcpy(library->name, pp + 0x00, 8);
           library->name[8] = 0;
           library->major = xe::load_and_swap<uint16_t>(pp + 0x08);
@@ -320,7 +327,7 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
         }
       } break;
       case XEX_HEADER_FILE_FORMAT_INFO: {
-        xe_xex2_file_format_info_t *fmt = &header->file_format_info;
+        xe_xex2_file_format_info_t* fmt = &header->file_format_info;
         fmt->encryption_type =
             (xe_xex2_encryption_type)xe::load_and_swap<uint16_t>(pp + 0x04);
         fmt->compression_type =
@@ -331,17 +338,18 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
             assert_always();
             break;
           case XEX_COMPRESSION_BASIC: {
-            xe_xex2_file_basic_compression_info_t *comp_info =
+            xe_xex2_file_basic_compression_info_t* comp_info =
                 &fmt->compression_info.basic;
             uint32_t info_size = xe::load_and_swap<uint32_t>(pp + 0x00);
             comp_info->block_count = (info_size - 8) / 8;
-            comp_info->blocks =
-                (xe_xex2_file_basic_compression_block_t *)calloc(
-                    comp_info->block_count,
-                    sizeof(xe_xex2_file_basic_compression_block_t));
-            XEEXPECTNOTNULL(comp_info->blocks);
+            comp_info->blocks = (xe_xex2_file_basic_compression_block_t*)calloc(
+                comp_info->block_count,
+                sizeof(xe_xex2_file_basic_compression_block_t));
+            if (!comp_info->blocks) {
+              return 1;
+            }
             for (size_t m = 0; m < comp_info->block_count; m++) {
-              xe_xex2_file_basic_compression_block_t *block =
+              xe_xex2_file_basic_compression_block_t* block =
                   &comp_info->blocks[m];
               block->data_size =
                   xe::load_and_swap<uint32_t>(pp + 0x08 + (m * 8));
@@ -350,13 +358,13 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
             }
           } break;
           case XEX_COMPRESSION_NORMAL: {
-            xe_xex2_file_normal_compression_info_t *comp_info =
+            xe_xex2_file_normal_compression_info_t* comp_info =
                 &fmt->compression_info.normal;
             uint32_t window_size = xe::load_and_swap<uint32_t>(pp + 0x08);
             uint32_t window_bits = 0;
             for (size_t m = 0; m < 32; m++, window_bits++) {
-              window_size <<= 1;
-              if (window_size == 0x80000000) {
+              window_size >>= 1;
+              if (window_size == 0x00000000) {
                 break;
               }
             }
@@ -400,11 +408,13 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
   ps = p + header->certificate_offset + 0x180;
   header->section_count = xe::load_and_swap<uint32_t>(ps + 0x000);
   ps += 4;
-  header->sections = (xe_xex2_section_t *)calloc(header->section_count,
-                                                 sizeof(xe_xex2_section_t));
-  XEEXPECTNOTNULL(header->sections);
+  header->sections = (xe_xex2_section_t*)calloc(header->section_count,
+                                                sizeof(xe_xex2_section_t));
+  if (!header->sections) {
+    return 1;
+  }
   for (size_t n = 0; n < header->section_count; n++) {
-    xe_xex2_section_t *section = &header->sections[n];
+    xe_xex2_section_t* section = &header->sections[n];
     section->page_size =
         header->exe_address <= 0x90000000 ? 64 * 1024 : 4 * 1024;
     section->info.value = xe::load_and_swap<uint32_t>(ps);
@@ -414,22 +424,19 @@ int xe_xex2_read_header(const uint8_t *addr, const size_t length,
   }
 
   return 0;
-
-XECLEANUP:
-  return 1;
 }
 
-int xe_xex2_decrypt_key(xe_xex2_header_t *header) {
-  const static uint8_t xe_xex2_retail_key[16] = {
+int xe_xex2_decrypt_key(xe_xex2_header_t* header) {
+  static const uint8_t xe_xex2_retail_key[16] = {
       0x20, 0xB1, 0x85, 0xA5, 0x9D, 0x28, 0xFD, 0xC3,
       0x40, 0x58, 0x3F, 0xBB, 0x08, 0x96, 0xBF, 0x91};
-  const static uint8_t xe_xex2_devkit_key[16] = {
+  static const uint8_t xe_xex2_devkit_key[16] = {
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
   // Guess key based on file info.
   // TODO: better way to finding out which key to use?
-  const uint8_t *xexkey;
+  const uint8_t* xexkey;
   if (header->execution_info.title_id && !FLAGS_xex_dev_key) {
     xexkey = xe_xex2_retail_key;
   } else {
@@ -446,18 +453,18 @@ int xe_xex2_decrypt_key(xe_xex2_header_t *header) {
 
 typedef struct mspack_memory_file_t {
   struct mspack_system sys;
-  void *buffer;
+  void* buffer;
   off_t buffer_size;
   off_t offset;
 } mspack_memory_file;
-mspack_memory_file *mspack_memory_open(struct mspack_system *sys, void *buffer,
+mspack_memory_file* mspack_memory_open(struct mspack_system* sys, void* buffer,
                                        const size_t buffer_size) {
   assert_true(buffer_size < INT_MAX);
   if (buffer_size >= INT_MAX) {
     return NULL;
   }
-  mspack_memory_file *memfile =
-      (mspack_memory_file *)calloc(1, sizeof(mspack_memory_file));
+  mspack_memory_file* memfile =
+      (mspack_memory_file*)calloc(1, sizeof(mspack_memory_file));
   if (!memfile) {
     return NULL;
   }
@@ -466,36 +473,36 @@ mspack_memory_file *mspack_memory_open(struct mspack_system *sys, void *buffer,
   memfile->offset = 0;
   return memfile;
 }
-void mspack_memory_close(mspack_memory_file *file) {
-  mspack_memory_file *memfile = (mspack_memory_file *)file;
+void mspack_memory_close(mspack_memory_file* file) {
+  mspack_memory_file* memfile = (mspack_memory_file*)file;
   free(memfile);
 }
-int mspack_memory_read(struct mspack_file *file, void *buffer, int chars) {
-  mspack_memory_file *memfile = (mspack_memory_file *)file;
+int mspack_memory_read(struct mspack_file* file, void* buffer, int chars) {
+  mspack_memory_file* memfile = (mspack_memory_file*)file;
   const off_t remaining = memfile->buffer_size - memfile->offset;
   const off_t total = std::min(static_cast<off_t>(chars), remaining);
-  memcpy(buffer, (uint8_t *)memfile->buffer + memfile->offset, total);
+  memcpy(buffer, (uint8_t*)memfile->buffer + memfile->offset, total);
   memfile->offset += total;
   return (int)total;
 }
-int mspack_memory_write(struct mspack_file *file, void *buffer, int chars) {
-  mspack_memory_file *memfile = (mspack_memory_file *)file;
+int mspack_memory_write(struct mspack_file* file, void* buffer, int chars) {
+  mspack_memory_file* memfile = (mspack_memory_file*)file;
   const off_t remaining = memfile->buffer_size - memfile->offset;
   const off_t total = std::min(static_cast<off_t>(chars), remaining);
-  memcpy((uint8_t *)memfile->buffer + memfile->offset, buffer, total);
+  memcpy((uint8_t*)memfile->buffer + memfile->offset, buffer, total);
   memfile->offset += total;
   return (int)total;
 }
-void *mspack_memory_alloc(struct mspack_system *sys, size_t chars) {
+void* mspack_memory_alloc(struct mspack_system* sys, size_t chars) {
   return calloc(chars, 1);
 }
-void mspack_memory_free(void *ptr) { free(ptr); }
-void mspack_memory_copy(void *src, void *dest, size_t chars) {
+void mspack_memory_free(void* ptr) { free(ptr); }
+void mspack_memory_copy(void* src, void* dest, size_t chars) {
   memcpy(dest, src, chars);
 }
-struct mspack_system *mspack_memory_sys_create() {
-  struct mspack_system *sys =
-      (struct mspack_system *)calloc(1, sizeof(struct mspack_system));
+struct mspack_system* mspack_memory_sys_create() {
+  struct mspack_system* sys =
+      (struct mspack_system*)calloc(1, sizeof(struct mspack_system));
   if (!sys) {
     return NULL;
   }
@@ -506,17 +513,17 @@ struct mspack_system *mspack_memory_sys_create() {
   sys->copy = mspack_memory_copy;
   return sys;
 }
-void mspack_memory_sys_destroy(struct mspack_system *sys) { free(sys); }
+void mspack_memory_sys_destroy(struct mspack_system* sys) { free(sys); }
 
-void xe_xex2_decrypt_buffer(const uint8_t *session_key,
-                            const uint8_t *input_buffer,
-                            const size_t input_size, uint8_t *output_buffer,
+void xe_xex2_decrypt_buffer(const uint8_t* session_key,
+                            const uint8_t* input_buffer,
+                            const size_t input_size, uint8_t* output_buffer,
                             const size_t output_size) {
   uint32_t rk[4 * (MAXNR + 1)];
   uint8_t ivec[16] = {0};
   int32_t Nr = rijndaelKeySetupDec(rk, session_key, 128);
-  const uint8_t *ct = input_buffer;
-  uint8_t *pt = output_buffer;
+  const uint8_t* ct = input_buffer;
+  uint8_t* pt = output_buffer;
   for (size_t n = 0; n < input_size; n += 16, ct += 16, pt += 16) {
     // Decrypt 16 uint8_ts from input -> output.
     rijndaelDecrypt(rk, Nr, ct, pt);
@@ -529,10 +536,10 @@ void xe_xex2_decrypt_buffer(const uint8_t *session_key,
   }
 }
 
-int xe_xex2_read_image_uncompressed(const xe_xex2_header_t *header,
-                                    const uint8_t *xex_addr,
+int xe_xex2_read_image_uncompressed(const xe_xex2_header_t* header,
+                                    const uint8_t* xex_addr,
                                     const uint32_t xex_length,
-                                    xe::Memory *memory) {
+                                    xe::Memory* memory) {
   // Allocate in-place the XEX memory.
   const uint32_t exe_length = xex_length - header->exe_offset;
   uint32_t uncompressed_size = exe_length;
@@ -547,10 +554,10 @@ int xe_xex2_read_image_uncompressed(const xe_xex2_header_t *header,
            uncompressed_size);
     return 2;
   }
-  uint8_t *buffer = memory->TranslateVirtual(header->exe_address);
+  uint8_t* buffer = memory->TranslateVirtual(header->exe_address);
   std::memset(buffer, 0, uncompressed_size);
 
-  const uint8_t *p = (const uint8_t *)xex_addr + header->exe_offset;
+  const uint8_t* p = (const uint8_t*)xex_addr + header->exe_offset;
 
   switch (header->file_format_info.encryption_type) {
     case XEX_ENCRYPTION_NONE:
@@ -571,17 +578,17 @@ int xe_xex2_read_image_uncompressed(const xe_xex2_header_t *header,
   return 0;
 }
 
-int xe_xex2_read_image_basic_compressed(const xe_xex2_header_t *header,
-                                        const uint8_t *xex_addr,
+int xe_xex2_read_image_basic_compressed(const xe_xex2_header_t* header,
+                                        const uint8_t* xex_addr,
                                         const uint32_t xex_length,
-                                        xe::Memory *memory) {
+                                        xe::Memory* memory) {
   const uint32_t exe_length = xex_length - header->exe_offset;
-  const uint8_t *source_buffer = (const uint8_t *)xex_addr + header->exe_offset;
-  const uint8_t *p = source_buffer;
+  const uint8_t* source_buffer = (const uint8_t*)xex_addr + header->exe_offset;
+  const uint8_t* p = source_buffer;
 
   // Calculate uncompressed length.
   uint32_t uncompressed_size = 0;
-  const xe_xex2_file_basic_compression_info_t *comp_info =
+  const xe_xex2_file_basic_compression_info_t* comp_info =
       &header->file_format_info.compression_info.basic;
   for (uint32_t n = 0; n < comp_info->block_count; n++) {
     const uint32_t data_size = comp_info->blocks[n].data_size;
@@ -592,7 +599,7 @@ int xe_xex2_read_image_basic_compressed(const xe_xex2_header_t *header,
   // Calculate the total size of the XEX image from its headers.
   uint32_t total_size = 0;
   for (uint32_t i = 0; i < header->section_count; i++) {
-    xe_xex2_section_t &section = header->sections[i];
+    xe_xex2_section_t& section = header->sections[i];
 
     total_size += section.info.page_count * section.page_size;
   }
@@ -609,9 +616,9 @@ int xe_xex2_read_image_basic_compressed(const xe_xex2_header_t *header,
            uncompressed_size);
     return 1;
   }
-  uint8_t *buffer = memory->TranslateVirtual(header->exe_address);
-  std::memset(buffer, 0, total_size); // Quickly zero the contents.
-  uint8_t *d = buffer;
+  uint8_t* buffer = memory->TranslateVirtual(header->exe_address);
+  std::memset(buffer, 0, total_size);  // Quickly zero the contents.
+  uint8_t* d = buffer;
 
   uint32_t rk[4 * (MAXNR + 1)];
   uint8_t ivec[16] = {0};
@@ -631,8 +638,8 @@ int xe_xex2_read_image_basic_compressed(const xe_xex2_header_t *header,
         memcpy(d, p, exe_length - (p - source_buffer));
         break;
       case XEX_ENCRYPTION_NORMAL: {
-        const uint8_t *ct = p;
-        uint8_t *pt = d;
+        const uint8_t* ct = p;
+        uint8_t* pt = d;
         for (size_t m = 0; m < data_size; m += 16, ct += 16, pt += 16) {
           // Decrypt 16 uint8_ts from input -> output.
           rijndaelDecrypt(rk, Nr, ct, pt);
@@ -656,12 +663,12 @@ int xe_xex2_read_image_basic_compressed(const xe_xex2_header_t *header,
   return 0;
 }
 
-int xe_xex2_read_image_compressed(const xe_xex2_header_t *header,
-                                  const uint8_t *xex_addr,
+int xe_xex2_read_image_compressed(const xe_xex2_header_t* header,
+                                  const uint8_t* xex_addr,
                                   const uint32_t xex_length,
-                                  xe::Memory *memory) {
+                                  xe::Memory* memory) {
   const uint32_t exe_length = xex_length - header->exe_offset;
-  const uint8_t *exe_buffer = (const uint8_t *)xex_addr + header->exe_offset;
+  const uint8_t* exe_buffer = (const uint8_t*)xex_addr + header->exe_offset;
 
   // src -> dest:
   // - decrypt (if encrypted)
@@ -673,20 +680,20 @@ int xe_xex2_read_image_compressed(const xe_xex2_header_t *header,
 
   int result_code = 1;
 
-  uint8_t *compress_buffer = NULL;
-  const uint8_t *p = NULL;
-  uint8_t *d = NULL;
-  uint8_t *deblock_buffer = NULL;
+  uint8_t* compress_buffer = NULL;
+  const uint8_t* p = NULL;
+  uint8_t* d = NULL;
+  uint8_t* deblock_buffer = NULL;
   size_t block_size = 0;
   uint32_t uncompressed_size = 0;
-  struct mspack_system *sys = NULL;
-  mspack_memory_file *lzxsrc = NULL;
-  mspack_memory_file *lzxdst = NULL;
-  struct lzxd_stream *lzxd = NULL;
+  struct mspack_system* sys = NULL;
+  mspack_memory_file* lzxsrc = NULL;
+  mspack_memory_file* lzxdst = NULL;
+  struct lzxd_stream* lzxd = NULL;
 
   // Decrypt (if needed).
   bool free_input = false;
-  const uint8_t *input_buffer = exe_buffer;
+  const uint8_t* input_buffer = exe_buffer;
   const size_t input_size = exe_length;
   switch (header->file_format_info.encryption_type) {
     case XEX_ENCRYPTION_NONE:
@@ -695,28 +702,25 @@ int xe_xex2_read_image_compressed(const xe_xex2_header_t *header,
     case XEX_ENCRYPTION_NORMAL:
       // TODO: a way to do without a copy/alloc?
       free_input = true;
-      input_buffer = (const uint8_t *)calloc(1, input_size);
-      XEEXPECTNOTNULL(input_buffer);
+      input_buffer = (const uint8_t*)calloc(1, input_size);
       xe_xex2_decrypt_buffer(header->session_key, exe_buffer, exe_length,
-                             (uint8_t *)input_buffer, input_size);
+                             (uint8_t*)input_buffer, input_size);
       break;
     default:
       assert_always();
       return false;
   }
 
-  compress_buffer = (uint8_t *)calloc(1, exe_length);
-  XEEXPECTNOTNULL(compress_buffer);
+  compress_buffer = (uint8_t*)calloc(1, exe_length);
 
   p = input_buffer;
   d = compress_buffer;
 
   // De-block.
-  deblock_buffer = (uint8_t *)calloc(1, input_size);
-  XEEXPECTNOTNULL(deblock_buffer);
+  deblock_buffer = (uint8_t*)calloc(1, input_size);
   block_size = header->file_format_info.compression_info.normal.block_size;
   while (block_size) {
-    const uint8_t *pnext = p + block_size;
+    const uint8_t* pnext = p + block_size;
     const size_t next_size = xe::load_and_swap<int32_t>(p);
     p += 4;
     p += 20;  // skip 20b hash
@@ -749,29 +753,24 @@ int xe_xex2_read_image_compressed(const xe_xex2_header_t *header,
     XELOGE("Unable to allocate XEX memory at %.8X-%.8X.", header->exe_address,
            uncompressed_size);
     result_code = 2;
-    goto XECLEANUP;
+    // Not doing any cleanup here;
+    // TODO(benvanik): rewrite this entire file using RAII.
+    assert_always();
+    return 1;
   }
-  uint8_t *buffer = memory->TranslateVirtual(header->exe_address);
+  uint8_t* buffer = memory->TranslateVirtual(header->exe_address);
   std::memset(buffer, 0, uncompressed_size);
 
   // Setup decompressor and decompress.
   sys = mspack_memory_sys_create();
-  XEEXPECTNOTNULL(sys);
-  lzxsrc =
-      mspack_memory_open(sys, (void *)compress_buffer, d - compress_buffer);
-  XEEXPECTNOTNULL(lzxsrc);
+  lzxsrc = mspack_memory_open(sys, (void*)compress_buffer, d - compress_buffer);
   lzxdst = mspack_memory_open(sys, buffer, uncompressed_size);
-  XEEXPECTNOTNULL(lzxdst);
   lzxd =
-      lzxd_init(sys, (struct mspack_file *)lzxsrc, (struct mspack_file *)lzxdst,
+      lzxd_init(sys, (struct mspack_file*)lzxsrc, (struct mspack_file*)lzxdst,
                 header->file_format_info.compression_info.normal.window_bits, 0,
                 32768, (off_t)header->loader_info.image_size);
-  XEEXPECTNOTNULL(lzxd);
-  XEEXPECTZERO(lzxd_decompress(lzxd, (off_t)header->loader_info.image_size));
+  result_code = lzxd_decompress(lzxd, (off_t)header->loader_info.image_size);
 
-  result_code = 0;
-
-XECLEANUP:
   if (lzxd) {
     lzxd_free(lzxd);
     lzxd = NULL;
@@ -791,14 +790,14 @@ XECLEANUP:
   free(compress_buffer);
   free(deblock_buffer);
   if (free_input) {
-    free((void *)input_buffer);
+    free((void*)input_buffer);
   }
   return result_code;
 }
 
-int xe_xex2_read_image(xe_xex2_ref xex, const uint8_t *xex_addr,
-                       const uint32_t xex_length, xe::Memory *memory) {
-  const xe_xex2_header_t *header = &xex->header;
+int xe_xex2_read_image(xe_xex2_ref xex, const uint8_t* xex_addr,
+                       const uint32_t xex_length, xe::Memory* memory) {
+  const xe_xex2_header_t* header = &xex->header;
   switch (header->file_format_info.compression_type) {
     case XEX_COMPRESSION_NONE:
       return xe_xex2_read_image_uncompressed(header, xex_addr, xex_length,
@@ -816,11 +815,11 @@ int xe_xex2_read_image(xe_xex2_ref xex, const uint8_t *xex_addr,
 }
 
 int xe_xex2_load_pe(xe_xex2_ref xex) {
-  const xe_xex2_header_t *header = &xex->header;
-  const uint8_t *p = xex->memory->TranslateVirtual(header->exe_address);
+  const xe_xex2_header_t* header = &xex->header;
+  const uint8_t* p = xex->memory->TranslateVirtual(header->exe_address);
 
   // Verify DOS signature (MZ).
-  const IMAGE_DOS_HEADER *doshdr = (const IMAGE_DOS_HEADER *)p;
+  const IMAGE_DOS_HEADER* doshdr = (const IMAGE_DOS_HEADER*)p;
   if (doshdr->e_magic != IMAGE_DOS_SIGNATURE) {
     XELOGE("PE signature mismatch; likely bad decryption/decompression");
     return 1;
@@ -830,13 +829,13 @@ int xe_xex2_load_pe(xe_xex2_ref xex) {
   p += doshdr->e_lfanew;
 
   // Verify NT signature (PE\0\0).
-  const IMAGE_NT_HEADERS32 *nthdr = (const IMAGE_NT_HEADERS32 *)(p);
+  const IMAGE_NT_HEADERS32* nthdr = (const IMAGE_NT_HEADERS32*)(p);
   if (nthdr->Signature != IMAGE_NT_SIGNATURE) {
     return 1;
   }
 
   // Verify matches an Xbox PE.
-  const IMAGE_FILE_HEADER *filehdr = &nthdr->FileHeader;
+  const IMAGE_FILE_HEADER* filehdr = &nthdr->FileHeader;
   if ((filehdr->Machine != IMAGE_FILE_MACHINE_POWERPCBE) ||
       !(filehdr->Characteristics & IMAGE_FILE_32BIT_MACHINE)) {
     return 1;
@@ -847,7 +846,7 @@ int xe_xex2_load_pe(xe_xex2_ref xex) {
   }
 
   // Verify optional header is 32bit.
-  const IMAGE_OPTIONAL_HEADER32 *opthdr = &nthdr->OptionalHeader;
+  const IMAGE_OPTIONAL_HEADER32* opthdr = &nthdr->OptionalHeader;
   if (opthdr->Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
     return 1;
   }
@@ -856,24 +855,32 @@ int xe_xex2_load_pe(xe_xex2_ref xex) {
     return 1;
   }
 
-  // Linker version - likely 8+
-  // Could be useful for recognizing certain patterns
-  // opthdr->MajorLinkerVersion; opthdr->MinorLinkerVersion;
+// Linker version - likely 8+
+// Could be useful for recognizing certain patterns
+// opthdr->MajorLinkerVersion; opthdr->MinorLinkerVersion;
 
-  // Data directories of interest:
-  // EXPORT           IMAGE_EXPORT_DIRECTORY
-  // IMPORT           IMAGE_IMPORT_DESCRIPTOR[]
-  // EXCEPTION        IMAGE_CE_RUNTIME_FUNCTION_ENTRY[]
-  // BASERELOC
-  // DEBUG            IMAGE_DEBUG_DIRECTORY[]
-  // ARCHITECTURE     /IMAGE_ARCHITECTURE_HEADER/ ----- import thunks!
-  // TLS              IMAGE_TLS_DIRECTORY
-  // IAT              Import Address Table ptr
-  // opthdr->DataDirectory[IMAGE_DIRECTORY_ENTRY_X].VirtualAddress / .Size
+// Data directories of interest:
+// EXPORT           IMAGE_EXPORT_DIRECTORY
+// IMPORT           IMAGE_IMPORT_DESCRIPTOR[]
+// EXCEPTION        IMAGE_CE_RUNTIME_FUNCTION_ENTRY[]
+// BASERELOC
+// DEBUG            IMAGE_DEBUG_DIRECTORY[]
+// ARCHITECTURE     /IMAGE_ARCHITECTURE_HEADER/ ----- import thunks!
+// TLS              IMAGE_TLS_DIRECTORY
+// IAT              Import Address Table ptr
+// opthdr->DataDirectory[IMAGE_DIRECTORY_ENTRY_X].VirtualAddress / .Size
+
+// The macros in pe_image.h don't work with clang, for some reason.
+// offsetof seems to be unable to find OptionalHeader.
+#define offsetof1(type, member) ((std::size_t) & (((type*)0)->member))
+#define IMAGE_FIRST_SECTION1(ntheader)                                   \
+  ((PIMAGE_SECTION_HEADER)(                                              \
+      (uint8_t*)ntheader + offsetof1(IMAGE_NT_HEADERS, OptionalHeader) + \
+      ((PIMAGE_NT_HEADERS)(ntheader))->FileHeader.SizeOfOptionalHeader))
 
   // Quick scan to determine bounds of sections.
   size_t upper_address = 0;
-  const IMAGE_SECTION_HEADER *sechdr = IMAGE_FIRST_SECTION(nthdr);
+  const IMAGE_SECTION_HEADER* sechdr = IMAGE_FIRST_SECTION1(nthdr);
   for (size_t n = 0; n < filehdr->NumberOfSections; n++, sechdr++) {
     const size_t physical_address = opthdr->ImageBase + sechdr->VirtualAddress;
     upper_address =
@@ -881,9 +888,9 @@ int xe_xex2_load_pe(xe_xex2_ref xex) {
   }
 
   // Setup/load sections.
-  sechdr = IMAGE_FIRST_SECTION(nthdr);
+  sechdr = IMAGE_FIRST_SECTION1(nthdr);
   for (size_t n = 0; n < filehdr->NumberOfSections; n++, sechdr++) {
-    PESection *section = (PESection *)calloc(1, sizeof(PESection));
+    PESection* section = (PESection*)calloc(1, sizeof(PESection));
     memcpy(section->name, sechdr->Name, sizeof(sechdr->Name));
     section->name[8] = 0;
     section->raw_address = sechdr->PointerToRawData;
@@ -899,8 +906,8 @@ int xe_xex2_load_pe(xe_xex2_ref xex) {
   return 0;
 }
 
-const PESection *xe_xex2_get_pe_section(xe_xex2_ref xex, const char *name) {
-  for (std::vector<PESection *>::iterator it = xex->sections->begin();
+const PESection* xe_xex2_get_pe_section(xe_xex2_ref xex, const char* name) {
+  for (std::vector<PESection*>::iterator it = xex->sections->begin();
        it != xex->sections->end(); ++it) {
     if (!strcmp((*it)->name, name)) {
       return *it;
@@ -910,11 +917,11 @@ const PESection *xe_xex2_get_pe_section(xe_xex2_ref xex, const char *name) {
 }
 
 int xe_xex2_find_import_infos(xe_xex2_ref xex,
-                              const xe_xex2_import_library_t *library) {
+                              const xe_xex2_import_library_t* library) {
   auto header = xe_xex2_get_header(xex);
 
   // Find library index for verification.
-  size_t library_index = -1;
+  size_t library_index = ~0ull;
   for (size_t n = 0; n < header->import_library_count; n++) {
     if (&header->import_libraries[n] == library) {
       library_index = n;
@@ -945,8 +952,8 @@ int xe_xex2_find_import_infos(xe_xex2_ref xex,
   }
 
   // Allocate storage.
-  xe_xex2_import_info_t *infos = (xe_xex2_import_info_t *)calloc(
-      info_count, sizeof(xe_xex2_import_info_t));
+  xe_xex2_import_info_t* infos =
+      (xe_xex2_import_info_t*)calloc(info_count, sizeof(xe_xex2_import_info_t));
   assert_not_null(infos);
 
   assert_not_zero(info_count);
@@ -963,19 +970,19 @@ int xe_xex2_find_import_infos(xe_xex2_ref xex,
 
     switch (type) {
       case 0x00: {
-        xe_xex2_import_info_t *info = &infos[i++];
+        xe_xex2_import_info_t* info = &infos[i++];
         info->ordinal = value & 0xFFFF;
         info->value_address = record;
       } break;
       case 0x01: {
         // Thunk for previous record.
         assert_true(i > 0);
-        xe_xex2_import_info_t *info = &infos[i - 1];
+        xe_xex2_import_info_t* info = &infos[i - 1];
         assert_true(info->ordinal == (value & 0xFFFF));
         info->thunk_address = record;
       } break;
       default:
-        // assert_always();
+        assert_always();
         break;
     }
   }
@@ -986,13 +993,13 @@ int xe_xex2_find_import_infos(xe_xex2_ref xex,
 }
 
 int xe_xex2_get_import_infos(xe_xex2_ref xex,
-                             const xe_xex2_import_library_t *library,
-                             xe_xex2_import_info_t **out_import_infos,
-                             size_t *out_import_info_count) {
+                             const xe_xex2_import_library_t* library,
+                             xe_xex2_import_info_t** out_import_infos,
+                             size_t* out_import_info_count) {
   auto header = xe_xex2_get_header(xex);
 
   // Find library index for verification.
-  size_t library_index = -1;
+  size_t library_index = ~0ull;
   for (size_t n = 0; n < header->import_library_count; n++) {
     if (&header->import_libraries[n] == library) {
       library_index = n;
@@ -1008,33 +1015,33 @@ int xe_xex2_get_import_infos(xe_xex2_ref xex,
   return 0;
 }
 
-uint32_t xe_xex2_lookup_export(xe_xex2_ref xex, const char *name) {
+uint32_t xe_xex2_lookup_export(xe_xex2_ref xex, const char* name) {
   auto header = xe_xex2_get_header(xex);
 
-  // no exports :(
+  // No exports.
   if (!header->pe_export_table_offset) {
     XELOGE("xe_xex2_lookup_export(%s) failed: no PE export table", name);
     return 0;
   }
 
-  auto e = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY *>(
+  auto e = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(
       xex->memory->TranslateVirtual(header->exe_address +
                                     header->pe_export_table_offset));
 
   // e->AddressOfX RVAs are relative to the IMAGE_EXPORT_DIRECTORY!
-  uint32_t *function_table = (uint32_t *)((uint64_t)e + e->AddressOfFunctions);
+  uint32_t* function_table = (uint32_t*)((uint64_t)e + e->AddressOfFunctions);
 
-  // Names relative to directory
-  uint32_t *name_table = (uint32_t *)((uint64_t)e + e->AddressOfNames);
+  // Names relative to directory.
+  uint32_t* name_table = (uint32_t*)((uint64_t)e + e->AddressOfNames);
 
-  // Table of ordinals (by name)
-  uint16_t *ordinal_table =
-      (uint16_t *)((uint64_t)e + e->AddressOfNameOrdinals);
+  // Table of ordinals (by name).
+  uint16_t* ordinal_table = (uint16_t*)((uint64_t)e + e->AddressOfNameOrdinals);
 
-  const char *mod_name = (const char *)((uint64_t)e + e->Name);
+  // Module name (sometimes).
+  // const char* mod_name = (const char*)((uint64_t)e + e->Name);
 
   for (uint32_t i = 0; i < e->NumberOfNames; i++) {
-    const char *fn_name = (const char *)((uint64_t)e + name_table[i]);
+    const char* fn_name = (const char*)((uint64_t)e + name_table[i]);
     uint16_t ordinal = ordinal_table[i];
     uint32_t addr = header->exe_address + function_table[ordinal];
 
@@ -1044,7 +1051,7 @@ uint32_t xe_xex2_lookup_export(xe_xex2_ref xex, const char *name) {
     }
   }
 
-  // No match
+  // No match.
   return 0;
 }
 
@@ -1053,17 +1060,17 @@ uint32_t xe_xex2_lookup_export(xe_xex2_ref xex, uint16_t ordinal) {
 
   // XEX-style export table.
   if (header->loader_info.export_table) {
-    auto export_table = reinterpret_cast<const xe_xex2_export_table *>(
+    auto export_table = reinterpret_cast<const xe::xex2_export_table*>(
         xex->memory->TranslateVirtual(header->loader_info.export_table));
-    uint32_t ordinal_count = xe::byte_swap(export_table->count);
-    uint32_t ordinal_base = xe::byte_swap(export_table->base);
+    uint32_t ordinal_count = export_table->count;
+    uint32_t ordinal_base = export_table->base;
     if (ordinal > ordinal_count) {
       XELOGE("xe_xex2_lookup_export: ordinal out of bounds");
       return 0;
     }
     uint32_t i = ordinal - ordinal_base;
-    uint32_t ordinal_offset = xe::byte_swap(export_table->ordOffset[i]);
-    ordinal_offset += xe::byte_swap(export_table->imagebaseaddr) << 16;
+    uint32_t ordinal_offset = export_table->ordOffset[i];
+    ordinal_offset += export_table->imagebaseaddr << 16;
     return ordinal_offset;
   }
 
@@ -1073,27 +1080,17 @@ uint32_t xe_xex2_lookup_export(xe_xex2_ref xex, uint16_t ordinal) {
     return 0;
   }
 
-  auto e = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY *>(
+  auto e = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(
       xex->memory->TranslateVirtual(header->exe_address +
                                     header->pe_export_table_offset));
 
   // e->AddressOfX RVAs are relative to the IMAGE_EXPORT_DIRECTORY!
-  // Functions relative to base
-  uint32_t *function_table = (uint32_t *)((uint64_t)e + e->AddressOfFunctions);
-
-  // Names relative to directory
-  uint32_t *name_table = (uint32_t *)((uint64_t)e + e->AddressOfNames);
-
-  // Table of ordinals (by name)
-  uint16_t *ordinal_table =
-      (uint16_t *)((uint64_t)e + e->AddressOfNameOrdinals);
-
-  const char *mod_name = (const char *)((uint64_t)e + e->Name);
-
+  // Functions relative to base.
+  uint32_t* function_table = (uint32_t*)((uint64_t)e + e->AddressOfFunctions);
   if (ordinal < e->NumberOfFunctions) {
     return header->exe_address + function_table[ordinal];
   }
 
-  // No match
+  // No match.
   return 0;
 }

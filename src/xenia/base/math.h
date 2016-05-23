@@ -56,11 +56,19 @@ T next_pow2(T value) {
   return value;
 }
 
+constexpr uint32_t make_bitmask(uint32_t a, uint32_t b) {
+  return (static_cast<uint32_t>(-1) >> (31 - b)) & ~((1u << a) - 1);
+}
+
+constexpr uint32_t select_bits(uint32_t value, uint32_t a, uint32_t b) {
+  return (value & make_bitmask(a, b)) >> a;
+}
+
 // lzcnt instruction, typed for integers of all sizes.
 // The number of leading zero bits in the value parameter. If value is zero, the
 // return value is the size of the input operand (8, 16, 32, or 64). If the most
 // significant bit of value is one, the return value is zero.
-#if XE_COMPILER_MSVC
+#if XE_PLATFORM_WIN32
 // TODO(benvanik): runtime magic so these point to an appropriate implementation
 // at runtime based on CPU features
 #if 0
@@ -72,27 +80,27 @@ inline uint8_t lzcnt(uint32_t v) { return static_cast<uint8_t>(__lzcnt(v)); }
 inline uint8_t lzcnt(uint64_t v) { return static_cast<uint8_t>(__lzcnt64(v)); }
 #else
 inline uint8_t lzcnt(uint8_t v) {
-  DWORD index;
-  DWORD mask = v;
-  BOOLEAN is_nonzero = _BitScanReverse(&index, mask);
+  unsigned long index;
+  unsigned long mask = v;
+  unsigned char is_nonzero = _BitScanReverse(&index, mask);
   return static_cast<uint8_t>(is_nonzero ? int8_t(index) ^ 0x7 : 8);
 }
 inline uint8_t lzcnt(uint16_t v) {
-  DWORD index;
-  DWORD mask = v;
-  BOOLEAN is_nonzero = _BitScanReverse(&index, mask);
+  unsigned long index;
+  unsigned long mask = v;
+  unsigned char is_nonzero = _BitScanReverse(&index, mask);
   return static_cast<uint8_t>(is_nonzero ? int8_t(index) ^ 0xF : 16);
 }
 inline uint8_t lzcnt(uint32_t v) {
-  DWORD index;
-  DWORD mask = v;
-  BOOLEAN is_nonzero = _BitScanReverse(&index, mask);
+  unsigned long index;
+  unsigned long mask = v;
+  unsigned char is_nonzero = _BitScanReverse(&index, mask);
   return static_cast<uint8_t>(is_nonzero ? int8_t(index) ^ 0x1F : 32);
 }
 inline uint8_t lzcnt(uint64_t v) {
-  DWORD index;
-  DWORD64 mask = v;
-  BOOLEAN is_nonzero = _BitScanReverse64(&index, mask);
+  unsigned long index;
+  unsigned long long mask = v;
+  unsigned char is_nonzero = _BitScanReverse64(&index, mask);
   return static_cast<uint8_t>(is_nonzero ? int8_t(index) ^ 0x3F : 64);
 }
 #endif  // LZCNT supported
@@ -109,7 +117,7 @@ inline uint8_t lzcnt(uint32_t v) {
 inline uint8_t lzcnt(uint64_t v) {
   return static_cast<uint8_t>(__builtin_clzll(v));
 }
-#endif  // XE_COMPILER_MSVC
+#endif  // XE_PLATFORM_WIN32
 inline uint8_t lzcnt(int8_t v) { return lzcnt(static_cast<uint8_t>(v)); }
 inline uint8_t lzcnt(int16_t v) { return lzcnt(static_cast<uint16_t>(v)); }
 inline uint8_t lzcnt(int32_t v) { return lzcnt(static_cast<uint32_t>(v)); }
@@ -119,7 +127,7 @@ inline uint8_t lzcnt(int64_t v) { return lzcnt(static_cast<uint64_t>(v)); }
 // Search the value from least significant bit (LSB) to the most significant bit
 // (MSB) for a set bit (1).
 // Returns false if no bits are set and the output index is invalid.
-#if XE_COMPILER_MSVC
+#if XE_PLATFORM_WIN32
 inline bool bit_scan_forward(uint32_t v, uint32_t* out_first_set_index) {
   return _BitScanForward(reinterpret_cast<unsigned long*>(out_first_set_index),
                          v) != 0;
@@ -139,7 +147,7 @@ inline bool bit_scan_forward(uint64_t v, uint32_t* out_first_set_index) {
   *out_first_set_index = i;
   return i != 0;
 }
-#endif  // XE_COMPILER_MSVC
+#endif  // XE_PLATFORM_WIN32
 inline bool bit_scan_forward(int32_t v, uint32_t* out_first_set_index) {
   return bit_scan_forward(static_cast<uint32_t>(v), out_first_set_index);
 }
@@ -160,7 +168,7 @@ template <typename T>
 inline T rotate_left(T v, uint8_t sh) {
   return (T(v) << sh) | (T(v) >> ((sizeof(T) * 8) - sh));
 }
-#if XE_COMPILER_MSVC
+#if XE_PLATFORM_WIN32
 template <>
 inline uint8_t rotate_left(uint8_t v, uint8_t sh) {
   return _rotl8(v, sh);
@@ -177,7 +185,13 @@ template <>
 inline uint64_t rotate_left(uint64_t v, uint8_t sh) {
   return _rotl64(v, sh);
 }
-#endif  // XE_COMPILER_MSVC
+#endif  // XE_PLATFORM_WIN32
+
+template <typename T>
+T clamp(T value, T min_value, T max_value) {
+  const T t = value < min_value ? min_value : value;
+  return t > max_value ? max_value : t;
+}
 
 // Utilities for SSE values.
 template <int N>

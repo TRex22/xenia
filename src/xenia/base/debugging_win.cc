@@ -8,9 +8,9 @@
  */
 
 #include "xenia/base/debugging.h"
-#include "xenia/base/string_buffer.h"
 
-#include <Windows.h>
+#include "xenia/base/platform_win.h"
+#include "xenia/base/string_buffer.h"
 
 namespace xe {
 namespace debugging {
@@ -19,7 +19,7 @@ bool IsDebuggerAttached() { return IsDebuggerPresent() ? true : false; }
 
 void Break() { __debugbreak(); }
 
-void DebugPrint(const char *fmt, ...) {
+void DebugPrint(const char* fmt, ...) {
   StringBuffer buff;
 
   va_list va;

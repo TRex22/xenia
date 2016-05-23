@@ -7,8 +7,8 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_HIR_OPCODES_H_
-#define XENIA_HIR_OPCODES_H_
+#ifndef XENIA_CPU_HIR_OPCODES_H_
+#define XENIA_CPU_HIR_OPCODES_H_
 
 #include <cstdint>
 
@@ -20,10 +20,12 @@ enum CallFlags {
   CALL_TAIL = (1 << 1),
   CALL_POSSIBLE_RETURN = (1 << 2),
 };
+
 enum BranchFlags {
   BRANCH_LIKELY = (1 << 1),
   BRANCH_UNLIKELY = (1 << 2),
 };
+
 enum RoundMode {
   // to zero/nearest/etc
   ROUND_TO_ZERO = 0,
@@ -31,51 +33,57 @@ enum RoundMode {
   ROUND_TO_MINUS_INFINITY,
   ROUND_TO_POSITIVE_INFINITY,
 };
-enum LoadFlags {
-  LOAD_NO_ALIAS = (1 << 1),
-  LOAD_ALIGNED = (1 << 2),
-  LOAD_UNALIGNED = (1 << 3),
-  LOAD_VOLATILE = (1 << 4),
+
+enum LoadStoreFlags {
+  LOAD_STORE_BYTE_SWAP = 1 << 0,
 };
-enum StoreFlags {
-  STORE_NO_ALIAS = (1 << 1),
-  STORE_ALIGNED = (1 << 2),
-  STORE_UNALIGNED = (1 << 3),
-  STORE_VOLATILE = (1 << 4),
-};
+
 enum PrefetchFlags {
   PREFETCH_LOAD = (1 << 1),
   PREFETCH_STORE = (1 << 2),
 };
+
 enum ArithmeticFlags {
   ARITHMETIC_UNSIGNED = (1 << 2),
   ARITHMETIC_SATURATE = (1 << 3),
 };
-#define PERMUTE_MASK(sel_x, x, sel_y, y, sel_z, z, sel_w, w)            \
-  ((((x)&0x3) << 0) | (sel_x << 2) | (((y)&0x3) << 8) | (sel_y << 10) | \
-   (((z)&0x3) << 16) | (sel_z << 18) | (((w)&0x3) << 24) | (sel_w << 26))
-enum Permutes {
-  PERMUTE_IDENTITY = PERMUTE_MASK(0, 0, 0, 1, 0, 2, 0, 3),
+
+constexpr uint32_t MakePermuteMask(uint32_t sel_x, uint32_t x, uint32_t sel_y,
+                                   uint32_t y, uint32_t sel_z, uint32_t z,
+                                   uint32_t sel_w, uint32_t w) {
+  return ((x & 0x3) << 0) | (sel_x << 2) | ((y & 0x3) << 8) | (sel_y << 10) |
+         ((z & 0x3) << 16) | (sel_z << 18) | ((w & 0x3) << 24) | (sel_w << 26);
+}
+
+enum PermuteMasks : uint32_t {
+  kIdentityPermuteMask = MakePermuteMask(0, 0, 0, 1, 0, 2, 0, 3),
 };
-#define SWIZZLE_MASK(x, y, z, w) \
-  ((((x)&0x3) << 0) | (((y)&0x3) << 2) | (((z)&0x3) << 4) | (((w)&0x3) << 6))
+
+constexpr uint32_t MakeSwizzleMask(uint32_t x, uint32_t y, uint32_t z,
+                                   uint32_t w) {
+  return ((x & 0x3) << 0) | ((y & 0x3) << 2) | ((z & 0x3) << 4) |
+         ((w & 0x3) << 6);
+}
+
 enum Swizzles {
-  SWIZZLE_XYZW_TO_XYZW = SWIZZLE_MASK(0, 1, 2, 3),
-  SWIZZLE_XYZW_TO_YZWX = SWIZZLE_MASK(1, 2, 3, 0),
-  SWIZZLE_XYZW_TO_ZWXY = SWIZZLE_MASK(2, 3, 0, 1),
-  SWIZZLE_XYZW_TO_WXYZ = SWIZZLE_MASK(3, 0, 1, 2),
+  SWIZZLE_XYZW_TO_XYZW = MakeSwizzleMask(0, 1, 2, 3),
+  SWIZZLE_XYZW_TO_YZWX = MakeSwizzleMask(1, 2, 3, 0),
+  SWIZZLE_XYZW_TO_ZWXY = MakeSwizzleMask(2, 3, 0, 1),
+  SWIZZLE_XYZW_TO_WXYZ = MakeSwizzleMask(3, 0, 1, 2),
 };
+
 enum PackType : uint16_t {
   // Special types:
   PACK_TYPE_D3DCOLOR = 0,
   PACK_TYPE_FLOAT16_2 = 1,
-  PACK_TYPE_FLOAT16_4 = 2,
-  PACK_TYPE_SHORT_2 = 3,
-  PACK_TYPE_UINT_2101010 = 4,
+  PACK_TYPE_FLOAT16_3 = 2,  // FIXME: Not verified, but looks correct.
+  PACK_TYPE_FLOAT16_4 = 3,
+  PACK_TYPE_SHORT_2 = 4,
+  PACK_TYPE_UINT_2101010 = 5,
 
   // Types which use the bitmasks below for configuration:
-  PACK_TYPE_8_IN_16 = 5,
-  PACK_TYPE_16_IN_32 = 6,
+  PACK_TYPE_8_IN_16 = 6,
+  PACK_TYPE_16_IN_32 = 7,
 
   PACK_TYPE_MODE = 0x000F,  // just to get the mode
 
@@ -91,6 +99,7 @@ enum PackType : uint16_t {
   PACK_TYPE_OUT_UNSATURATE = 0 << 15,
   PACK_TYPE_OUT_SATURATE = 1 << 15,
 };
+
 inline bool IsPackToHi(uint32_t flags) {
   return (flags & PACK_TYPE_TO_HI) == PACK_TYPE_TO_HI;
 }
@@ -140,12 +149,14 @@ enum Opcode {
   OPCODE_STORE_LOCAL,
   OPCODE_LOAD_CONTEXT,
   OPCODE_STORE_CONTEXT,
+  OPCODE_CONTEXT_BARRIER,
   OPCODE_LOAD_MMIO,
   OPCODE_STORE_MMIO,
   OPCODE_LOAD,
   OPCODE_STORE,
   OPCODE_MEMSET,
   OPCODE_PREFETCH,
+  OPCODE_MEMORY_BARRIER,
   OPCODE_MAX,
   OPCODE_VECTOR_MAX,
   OPCODE_MIN,
@@ -209,10 +220,8 @@ enum Opcode {
   OPCODE_SWIZZLE,
   OPCODE_PACK,
   OPCODE_UNPACK,
-  OPCODE_COMPARE_EXCHANGE,
   OPCODE_ATOMIC_EXCHANGE,
-  OPCODE_ATOMIC_ADD,
-  OPCODE_ATOMIC_SUB,
+  OPCODE_ATOMIC_COMPARE_EXCHANGE,
   __OPCODE_MAX_VALUE,  // Keep at end.
 };
 
@@ -296,4 +305,4 @@ typedef struct {
 }  // namespace cpu
 }  // namespace xe
 
-#endif  // XENIA_HIR_OPCODES_H_
+#endif  // XENIA_CPU_HIR_OPCODES_H_

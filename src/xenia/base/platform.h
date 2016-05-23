@@ -10,9 +10,15 @@
 #ifndef XENIA_BASE_PLATFORM_H_
 #define XENIA_BASE_PLATFORM_H_
 
+// This file contains the main platform switches used by xenia as well as any
+// fixups required to normalize the environment. Everything in here should be
+// largely portable.
+// Platform-specific headers, like platform_win.h, are used to house any
+// super platform-specific stuff that implies code is not platform-agnostic.
+//
 // NOTE: ordering matters here as sometimes multiple flags are defined on
 // certain platforms.
-
+//
 // Great resource on predefined macros: http://predef.sourceforge.net/preos.html
 
 #if defined(__APPLE__)
@@ -42,34 +48,37 @@
 #endif
 
 #if XE_PLATFORM_WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <SDKDDKVer.h>
-#include <windows.h>
-#include <ObjBase.h>
-#undef min
-#undef max
 #define strdup _strdup
 #define strcasecmp _stricmp
 #define strncasecmp _strnicmp
-#endif  // XE_PLATFORM_WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX  // Don't want windows.h including min/max macros.
+#endif            // XE_PLATFORM_WIN32
 
-#if XE_COMPILER_MSVC
+#if XE_PLATFORM_WIN32
 #include <intrin.h>
 #else
 #include <x86intrin.h>
-#endif  // XE_COMPILER_MSVC
+#endif  // XE_PLATFORM_WIN32
+
+#if XE_PLATFORM_MAC
+#include <libkern/OSByteOrder.h>
+#endif  // XE_PLATFORM_MAC
 
 namespace xe {
 
 #if XE_PLATFORM_WIN32
-const char path_separator = '\\';
-const size_t max_path = _MAX_PATH;
+const char kPathSeparator = '\\';
+const wchar_t kWPathSeparator = L'\\';
+const size_t kMaxPath = 260;  // _MAX_PATH
 #else
-const char path_separator = '/';
-const size_t max_path = 1024;  // PATH_MAX
+const char kPathSeparator = '/';
+const wchar_t kWPathSeparator = L'/';
+const size_t kMaxPath = 1024;  // PATH_MAX
 #endif  // XE_PLATFORM_WIN32
+
+// Launches a web browser to the given URL.
+void LaunchBrowser(const char* url);
 
 }  // namespace xe
 

@@ -12,20 +12,27 @@
 
 #include <gflags/gflags.h>
 
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <list>
 #include <memory>
-#include <mutex>
+#include <vector>
 
+#include "xenia/base/bit_map.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/export_resolver.h"
-#include "xenia/kernel/app.h"
-#include "xenia/kernel/content_manager.h"
-#include "xenia/kernel/fs/filesystem.h"
-#include "xenia/kernel/object_table.h"
-#include "xenia/kernel/user_profile.h"
+#include "xenia/kernel/util/native_list.h"
+#include "xenia/kernel/util/object_table.h"
+#include "xenia/kernel/xam/app_manager.h"
+#include "xenia/kernel/xam/content_manager.h"
+#include "xenia/kernel/xam/user_profile.h"
 #include "xenia/memory.h"
+#include "xenia/vfs/virtual_file_system.h"
 #include "xenia/xbox.h"
 
 namespace xe {
+class ByteStream;
 class Emulator;
 namespace cpu {
 class Processor;
@@ -38,11 +45,17 @@ namespace xe {
 namespace kernel {
 
 class Dispatcher;
-class XKernelModule;
+class XHostThread;
+class KernelModule;
 class XModule;
-class XNotifyListener;
+class NotifyListener;
 class XThread;
-class XUserModule;
+class UserModule;
+
+// (?), used by KeGetCurrentProcessType
+constexpr uint32_t X_PROCTYPE_IDLE = 0;
+constexpr uint32_t X_PROCTYPE_USER = 1;
+constexpr uint32_t X_PROCTYPE_SYSTEM = 2;
 
 struct ProcessInfoBlock {
   xe::be<uint32_t> unk_00;
@@ -69,9 +82,14 @@ struct ProcessInfoBlock {
   xe::be<uint32_t> unk_5C;
 };
 
+struct TerminateNotification {
+  uint32_t guest_routine;
+  uint32_t priority;
+};
+
 class KernelState {
  public:
-  KernelState(Emulator* emulator);
+  explicit KernelState(Emulator* emulator);
   ~KernelState();
 
   static KernelState* shared();
@@ -79,18 +97,18 @@ class KernelState {
   Emulator* emulator() const { return emulator_; }
   Memory* memory() const { return memory_; }
   cpu::Processor* processor() const { return processor_; }
-  fs::FileSystem* file_system() const { return file_system_; }
+  vfs::VirtualFileSystem* file_system() const { return file_system_; }
 
   uint32_t title_id() const;
 
-  Dispatcher* dispatcher() const { return dispatcher_; }
+  xam::AppManager* app_manager() const { return app_manager_.get(); }
+  xam::ContentManager* content_manager() const {
+    return content_manager_.get();
+  }
+  xam::UserProfile* user_profile() const { return user_profile_.get(); }
 
-  XAppManager* app_manager() const { return app_manager_.get(); }
-  UserProfile* user_profile() const { return user_profile_.get(); }
-  ContentManager* content_manager() const { return content_manager_.get(); }
-
-  ObjectTable* object_table() const { return object_table_; }
-  xe::recursive_mutex& object_mutex() { return object_mutex_; }
+  // Access must be guarded by the global critical region.
+  util::ObjectTable* object_table() { return &object_table_; }
 
   uint32_t process_type() const;
   void set_process_type(uint32_t value);
@@ -98,19 +116,40 @@ class KernelState {
     return process_info_block_address_;
   }
 
+  uint32_t AllocateTLS();
+  void FreeTLS(uint32_t slot);
+
+  void RegisterTitleTerminateNotification(uint32_t routine, uint32_t priority);
+  void RemoveTitleTerminateNotification(uint32_t routine);
+
   void RegisterModule(XModule* module);
   void UnregisterModule(XModule* module);
+  bool RegisterUserModule(object_ref<UserModule> module);
+  void UnregisterUserModule(UserModule* module);
   bool IsKernelModule(const char* name);
-  object_ref<XModule> GetModule(const char* name);
-  object_ref<XUserModule> GetExecutableModule();
-  void SetExecutableModule(object_ref<XUserModule> module);
+  object_ref<XModule> GetModule(const char* name, bool user_only = false);
+
+  object_ref<UserModule> GetExecutableModule();
+  void SetExecutableModule(object_ref<UserModule> module);
+  object_ref<UserModule> LoadUserModule(const char* name,
+                                        bool call_entry = true);
+
+  object_ref<KernelModule> GetKernelModule(const char* name);
   template <typename T>
-  object_ref<XKernelModule> LoadKernelModule() {
-    auto kernel_module = object_ref<XKernelModule>(new T(emulator_, this));
+  object_ref<KernelModule> LoadKernelModule() {
+    auto kernel_module = object_ref<KernelModule>(new T(emulator_, this));
     LoadKernelModule(kernel_module);
     return kernel_module;
   }
-  object_ref<XUserModule> LoadUserModule(const char* name);
+  template <typename T>
+  object_ref<T> GetKernelModule(const char* name) {
+    auto module = GetKernelModule(name);
+    return object_ref<T>(reinterpret_cast<T*>(module.release()));
+  }
+
+  // Terminates a title: Unloads all modules, and kills all guest threads.
+  // This DOES NOT RETURN if called from a guest thread!
+  void TerminateTitle();
 
   void RegisterThread(XThread* thread);
   void UnregisterThread(XThread* thread);
@@ -118,9 +157,11 @@ class KernelState {
   void OnThreadExit(XThread* thread);
   object_ref<XThread> GetThreadByID(uint32_t thread_id);
 
-  void RegisterNotifyListener(XNotifyListener* listener);
-  void UnregisterNotifyListener(XNotifyListener* listener);
+  void RegisterNotifyListener(NotifyListener* listener);
+  void UnregisterNotifyListener(NotifyListener* listener);
   void BroadcastNotification(XNotificationID id, uint32_t data);
+
+  util::NativeList* dpc_list() { return &dpc_list_; }
 
   void CompleteOverlapped(uint32_t overlapped_ptr, X_RESULT result);
   void CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
@@ -128,33 +169,51 @@ class KernelState {
   void CompleteOverlappedImmediate(uint32_t overlapped_ptr, X_RESULT result);
   void CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESULT result,
                                      uint32_t extended_error, uint32_t length);
+  void CompleteOverlappedDeferred(std::function<void()> completion_callback,
+                                  uint32_t overlapped_ptr, X_RESULT result);
+  void CompleteOverlappedDeferredEx(std::function<void()> completion_callback,
+                                    uint32_t overlapped_ptr, X_RESULT result,
+                                    uint32_t extended_error, uint32_t length);
+
+  bool Save(ByteStream* stream);
+  bool Restore(ByteStream* stream);
 
  private:
-  void LoadKernelModule(object_ref<XKernelModule> kernel_module);
+  void LoadKernelModule(object_ref<KernelModule> kernel_module);
 
   Emulator* emulator_;
   Memory* memory_;
   cpu::Processor* processor_;
-  fs::FileSystem* file_system_;
+  vfs::VirtualFileSystem* file_system_;
 
-  Dispatcher* dispatcher_;
+  std::unique_ptr<xam::AppManager> app_manager_;
+  std::unique_ptr<xam::ContentManager> content_manager_;
+  std::unique_ptr<xam::UserProfile> user_profile_;
 
-  std::unique_ptr<XAppManager> app_manager_;
-  std::unique_ptr<UserProfile> user_profile_;
-  std::unique_ptr<ContentManager> content_manager_;
+  xe::global_critical_region global_critical_region_;
 
-  ObjectTable* object_table_;
-  xe::recursive_mutex object_mutex_;
+  // Must be guarded by the global critical region.
+  util::ObjectTable object_table_;
   std::unordered_map<uint32_t, XThread*> threads_by_id_;
-  std::vector<object_ref<XNotifyListener>> notify_listeners_;
-  bool has_notified_startup_;
+  std::vector<object_ref<NotifyListener>> notify_listeners_;
+  bool has_notified_startup_ = false;
 
-  uint32_t process_type_;
-  object_ref<XUserModule> executable_module_;
-  std::vector<object_ref<XKernelModule>> kernel_modules_;
-  std::vector<object_ref<XUserModule>> user_modules_;
+  uint32_t process_type_ = X_PROCTYPE_USER;
+  object_ref<UserModule> executable_module_;
+  std::vector<object_ref<KernelModule>> kernel_modules_;
+  std::vector<object_ref<UserModule>> user_modules_;
+  std::vector<TerminateNotification> terminate_notifications_;
 
-  uint32_t process_info_block_address_;
+  uint32_t process_info_block_address_ = 0;
+
+  std::atomic<bool> dispatch_thread_running_;
+  object_ref<XHostThread> dispatch_thread_;
+  // Must be guarded by the global critical region.
+  util::NativeList dpc_list_;
+  std::condition_variable_any dispatch_cond_;
+  std::list<std::function<void()>> dispatch_queue_;
+
+  BitMap tls_bitmap_;
 
   friend class XObject;
 };

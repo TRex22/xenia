@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+// clang-format off
 
 DEFINE_OPCODE(
     OPCODE_COMMENT,
@@ -213,16 +214,22 @@ DEFINE_OPCODE(
     0)
 
 DEFINE_OPCODE(
+    OPCODE_CONTEXT_BARRIER,
+    "context_barrier",
+    OPCODE_SIG_X,
+    0)
+
+DEFINE_OPCODE(
     OPCODE_LOAD_MMIO,
     "load_mmio",
     OPCODE_SIG_V_O_O,
     OPCODE_FLAG_MEMORY)
 
 DEFINE_OPCODE(
-  OPCODE_STORE_MMIO,
-  "store_mmio",
-  OPCODE_SIG_X_O_O_V,
-  OPCODE_FLAG_MEMORY)
+    OPCODE_STORE_MMIO,
+    "store_mmio",
+    OPCODE_SIG_X_O_O_V,
+    OPCODE_FLAG_MEMORY)
 
 DEFINE_OPCODE(
     OPCODE_LOAD,
@@ -240,13 +247,19 @@ DEFINE_OPCODE(
     OPCODE_MEMSET,
     "memset",
     OPCODE_SIG_X_V_V_V,
-    0)
+    OPCODE_FLAG_MEMORY)
 
 DEFINE_OPCODE(
     OPCODE_PREFETCH,
     "prefetch",
     OPCODE_SIG_X_V_O,
-    0)
+    OPCODE_FLAG_MEMORY)
+
+DEFINE_OPCODE(
+    OPCODE_MEMORY_BARRIER,
+    "memory_barrier",
+    OPCODE_SIG_X,
+    OPCODE_FLAG_MEMORY | OPCODE_FLAG_VOLATILE)
 
 DEFINE_OPCODE(
     OPCODE_MAX,
@@ -614,25 +627,13 @@ DEFINE_OPCODE(
     0)
 
 DEFINE_OPCODE(
-    OPCODE_COMPARE_EXCHANGE,
-    "compare_exchange",
-    OPCODE_SIG_V_V_V_V,
-    OPCODE_FLAG_VOLATILE)
-
-DEFINE_OPCODE(
     OPCODE_ATOMIC_EXCHANGE,
     "atomic_exchange",
     OPCODE_SIG_V_V_V,
     OPCODE_FLAG_VOLATILE)
 
 DEFINE_OPCODE(
-    OPCODE_ATOMIC_ADD,
-    "atomic_add",
-    OPCODE_SIG_V_V_V,
-    0)
-
-DEFINE_OPCODE(
-    OPCODE_ATOMIC_SUB,
-    "atomic_sub",
-    OPCODE_SIG_V_V_V,
-    0)
+    OPCODE_ATOMIC_COMPARE_EXCHANGE,
+    "atomic_compare_exchange",
+    OPCODE_SIG_V_V_V_V,
+    OPCODE_FLAG_VOLATILE)

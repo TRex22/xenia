@@ -10,7 +10,14 @@
 #ifndef XENIA_HID_INPUT_DRIVER_H_
 #define XENIA_HID_INPUT_DRIVER_H_
 
+#include "xenia/hid/input.h"
 #include "xenia/xbox.h"
+
+namespace xe {
+namespace ui {
+class Window;
+}  // namespace ui
+}  // namespace xe
 
 namespace xe {
 namespace hid {
@@ -32,9 +39,9 @@ class InputDriver {
                                 X_INPUT_KEYSTROKE* out_keystroke) = 0;
 
  protected:
-  InputDriver(InputSystem* input_system);
+  explicit InputDriver(xe::ui::Window* window);
 
-  InputSystem* input_system_;
+  xe::ui::Window* window_ = nullptr;
 };
 
 }  // namespace hid

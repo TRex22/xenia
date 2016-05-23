@@ -9,178 +9,124 @@
 
 #include "xenia/gpu/gl4/gl4_shader.h"
 
-#include "xenia/base/fs.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
-#include "xenia/gpu/gl4/gl4_gpu-private.h"
-#include "xenia/gpu/gl4/gl4_shader_translator.h"
-#include "xenia/gpu/gpu-private.h"
 
 namespace xe {
 namespace gpu {
 namespace gl4 {
 
-using namespace xe::gpu::xenos;
-
-extern "C" GLEWContext* glewGetContext();
-
 GL4Shader::GL4Shader(ShaderType shader_type, uint64_t data_hash,
                      const uint32_t* dword_ptr, uint32_t dword_count)
-    : Shader(shader_type, data_hash, dword_ptr, dword_count),
-      program_(0),
-      vao_(0) {}
+    : Shader(shader_type, data_hash, dword_ptr, dword_count) {}
 
 GL4Shader::~GL4Shader() {
   glDeleteProgram(program_);
   glDeleteVertexArrays(1, &vao_);
 }
 
-std::string GL4Shader::GetHeader() {
-  static const std::string header =
-      "#version 450\n"
-      "#extension all : warn\n"
-      "#extension GL_ARB_bindless_texture : require\n"
-      "#extension GL_ARB_explicit_uniform_location : require\n"
-      "#extension GL_ARB_shader_draw_parameters : require\n"
-      "#extension GL_ARB_shader_storage_buffer_object : require\n"
-      "#extension GL_ARB_shading_language_420pack : require\n"
-      "#extension GL_ARB_fragment_coord_conventions : require\n"
-      "#define FLT_MAX 3.402823466e+38\n"
-      "precision highp float;\n"
-      "precision highp int;\n"
-      "layout(std140, column_major) uniform;\n"
-      "layout(std430, column_major) buffer;\n"
-      "\n"
-      // This must match DrawBatcher::CommonHeader.
-      "struct StateData {\n"
-      "  vec4 window_scale;\n"
-      "  vec4 vtx_fmt;\n"
-      "  vec4 alpha_test;\n"
-      // TODO(benvanik): variable length.
-      "  uvec2 texture_samplers[32];\n"
-      "  vec4 float_consts[512];\n"
-      "  int bool_consts[8];\n"
-      "  int loop_consts[32];\n"
-      "};\n"
-      "layout(binding = 0) buffer State {\n"
-      "  StateData states[];\n"
-      "};\n"
-      "\n"
-      "struct VertexData {\n"
-      "  vec4 o[16];\n"
-      "};\n";
-  return header;
+bool GL4Shader::Prepare() {
+  // Build static vertex array descriptor.
+  if (!PrepareVertexArrayObject()) {
+    XELOGE("Unable to prepare vertex shader array object");
+    return false;
+  }
+
+  bool success = true;
+  if (!CompileShader()) {
+    host_error_log_ = GetShaderInfoLog();
+    success = false;
+  }
+  if (success && !LinkProgram()) {
+    host_error_log_ = GetProgramInfoLog();
+    success = false;
+  }
+
+  if (success) {
+    host_binary_ = GetBinary();
+    host_disassembly_ = GetHostDisasmNV(host_binary_);
+  }
+  is_valid_ = success;
+
+  return success;
 }
 
-std::string GL4Shader::GetFooter() {
-  // http://www.nvidia.com/object/cube_map_ogl_tutorial.html
-  // http://developer.amd.com/wordpress/media/2012/10/R600_Instruction_Set_Architecture.pdf
-  // src0 = Rn.zzxy, src1 = Rn.yxzz
-  // dst.W = FaceId;
-  // dst.Z = 2.0f * MajorAxis;
-  // dst.Y = S cube coordinate;
-  // dst.X = T cube coordinate;
-  /*
-  major axis
-  direction     target                                sc     tc    ma
-  ----------   ------------------------------------   ---    ---   ---
-  +rx          GL_TEXTURE_CUBE_MAP_POSITIVE_X_EXT=0   -rz    -ry   rx
-  -rx          GL_TEXTURE_CUBE_MAP_NEGATIVE_X_EXT=1   +rz    -ry   rx
-  +ry          GL_TEXTURE_CUBE_MAP_POSITIVE_Y_EXT=2   +rx    +rz   ry
-  -ry          GL_TEXTURE_CUBE_MAP_NEGATIVE_Y_EXT=3   +rx    -rz   ry
-  +rz          GL_TEXTURE_CUBE_MAP_POSITIVE_Z_EXT=4   +rx    -ry   rz
-  -rz          GL_TEXTURE_CUBE_MAP_NEGATIVE_Z_EXT=5   -rx    -ry   rz
-  */
-  static const std::string footer =
-      "vec4 cube(vec4 src0, vec4 src1) {\n"
-      "  vec3 src = vec3(src1.y, src1.x, src1.z);\n"
-      "  vec3 abs_src = abs(src);\n"
-      "  int face_id;\n"
-      "  float sc;\n"
-      "  float tc;\n"
-      "  float ma;\n"
-      "  if (abs_src.x > abs_src.y && abs_src.x > abs_src.z) {\n"
-      "    if (src.x > 0.0) {\n"
-      "      face_id = 0; sc = -abs_src.z; tc = -abs_src.y; ma = abs_src.x;\n"
-      "    } else {\n"
-      "      face_id = 1; sc =  abs_src.z; tc = -abs_src.y; ma = abs_src.x;\n"
-      "    }\n"
-      "  } else if (abs_src.y > abs_src.x && abs_src.y > abs_src.z) {\n"
-      "    if (src.y > 0.0) {\n"
-      "      face_id = 2; sc =  abs_src.x; tc =  abs_src.z; ma = abs_src.y;\n"
-      "    } else {\n"
-      "      face_id = 3; sc =  abs_src.x; tc = -abs_src.z; ma = abs_src.y;\n"
-      "    }\n"
-      "  } else {\n"
-      "    if (src.z > 0.0) {\n"
-      "      face_id = 4; sc =  abs_src.x; tc = -abs_src.y; ma = abs_src.z;\n"
-      "    } else {\n"
-      "      face_id = 5; sc = -abs_src.x; tc = -abs_src.y; ma = abs_src.z;\n"
-      "    }\n"
-      "  }\n"
-      "  float s = (sc / ma + 1.0) / 2.0;\n"
-      "  float t = (tc / ma + 1.0) / 2.0;\n"
-      "  return vec4(t, s, 2.0 * ma, float(face_id));\n"
-      "}\n";
-  return footer;
+bool GL4Shader::LoadFromBinary(const uint8_t* blob, GLenum binary_format,
+                               size_t length) {
+  program_ = glCreateProgram();
+  glProgramBinary(program_, binary_format, blob, GLsizei(length));
+
+  GLint link_status = 0;
+  glGetProgramiv(program_, GL_LINK_STATUS, &link_status);
+  if (!link_status) {
+    // Failed to link. Not fatal - just clean up so we can get generated later.
+    XELOGD("GL4Shader::LoadFromBinary failed. Log:\n%s",
+           GetProgramInfoLog().c_str());
+    glDeleteProgram(program_);
+    program_ = 0;
+
+    return false;
+  }
+
+  // Build static vertex array descriptor.
+  if (!PrepareVertexArrayObject()) {
+    XELOGE("Unable to prepare vertex shader array object");
+    return false;
+  }
+
+  // Success!
+  host_binary_ = GetBinary();
+  host_disassembly_ = GetHostDisasmNV(host_binary_);
+
+  is_valid_ = true;
+  return true;
 }
 
 bool GL4Shader::PrepareVertexArrayObject() {
   glCreateVertexArrays(1, &vao_);
 
-  bool has_bindless_vbos = false;
-  if (FLAGS_vendor_gl_extensions && GLEW_NV_vertex_buffer_unified_memory) {
-    has_bindless_vbos = true;
-    // Nasty, but no DSA for this.
-    glBindVertexArray(vao_);
-    glEnableClientState(GL_VERTEX_ATTRIB_ARRAY_UNIFIED_NV);
-    glEnableClientState(GL_ELEMENT_ARRAY_UNIFIED_NV);
-  }
-
-  uint32_t el_index = 0;
-  for (uint32_t buffer_index = 0; buffer_index < buffer_inputs_.count;
-       ++buffer_index) {
-    const auto& desc = buffer_inputs_.descs[buffer_index];
-
-    for (uint32_t i = 0; i < desc.element_count; ++i, ++el_index) {
-      const auto& el = desc.elements[i];
-      auto comp_count = GetVertexFormatComponentCount(el.format);
-      GLenum comp_type;
-      switch (el.format) {
+  for (const auto& vertex_binding : vertex_bindings()) {
+    for (const auto& attrib : vertex_binding.attributes) {
+      auto comp_count = GetVertexFormatComponentCount(
+          attrib.fetch_instr.attributes.data_format);
+      GLenum comp_type = 0;
+      bool is_signed = attrib.fetch_instr.attributes.is_signed;
+      switch (attrib.fetch_instr.attributes.data_format) {
         case VertexFormat::k_8_8_8_8:
-          comp_type = el.is_signed ? GL_BYTE : GL_UNSIGNED_BYTE;
+          comp_type = is_signed ? GL_BYTE : GL_UNSIGNED_BYTE;
           break;
         case VertexFormat::k_2_10_10_10:
-          comp_type = el.is_signed ? GL_INT_2_10_10_10_REV
-                                   : GL_UNSIGNED_INT_2_10_10_10_REV;
+          comp_type = is_signed ? GL_INT : GL_UNSIGNED_INT;
+          comp_count = 1;
           break;
         case VertexFormat::k_10_11_11:
-          // assert_false(el.is_signed);
-          XELOGW("Signed k_10_11_11 vertex format not supported by GL");
-          comp_type = GL_UNSIGNED_INT_10F_11F_11F_REV;
+          comp_type = is_signed ? GL_INT : GL_UNSIGNED_INT;
+          comp_count = 1;
           break;
-        /*case VertexFormat::k_11_11_10:
-        break;*/
+        case VertexFormat::k_11_11_10:
+          assert_true(is_signed);
+          comp_type = is_signed ? GL_R11F_G11F_B10F : 0;
+          break;
         case VertexFormat::k_16_16:
-          comp_type = el.is_signed ? GL_SHORT : GL_UNSIGNED_SHORT;
+          comp_type = is_signed ? GL_SHORT : GL_UNSIGNED_SHORT;
           break;
         case VertexFormat::k_16_16_FLOAT:
           comp_type = GL_HALF_FLOAT;
           break;
         case VertexFormat::k_16_16_16_16:
-          comp_type = el.is_signed ? GL_SHORT : GL_UNSIGNED_SHORT;
+          comp_type = is_signed ? GL_SHORT : GL_UNSIGNED_SHORT;
           break;
         case VertexFormat::k_16_16_16_16_FLOAT:
           comp_type = GL_HALF_FLOAT;
           break;
         case VertexFormat::k_32:
-          comp_type = el.is_signed ? GL_INT : GL_UNSIGNED_INT;
+          comp_type = is_signed ? GL_INT : GL_UNSIGNED_INT;
           break;
         case VertexFormat::k_32_32:
-          comp_type = el.is_signed ? GL_INT : GL_UNSIGNED_INT;
+          comp_type = is_signed ? GL_INT : GL_UNSIGNED_INT;
           break;
         case VertexFormat::k_32_32_32_32:
-          comp_type = el.is_signed ? GL_INT : GL_UNSIGNED_INT;
+          comp_type = is_signed ? GL_INT : GL_UNSIGNED_INT;
           break;
         case VertexFormat::k_32_FLOAT:
           comp_type = GL_FLOAT;
@@ -195,263 +141,156 @@ bool GL4Shader::PrepareVertexArrayObject() {
           comp_type = GL_FLOAT;
           break;
         default:
-          assert_unhandled_case(el.format);
+          assert_unhandled_case(attrib.fetch_instr.attributes.data_format);
           return false;
       }
 
-      glEnableVertexArrayAttrib(vao_, el_index);
-      if (has_bindless_vbos) {
-        // NOTE: MultiDrawIndirectBindlessMumble doesn't handle separate
-        // vertex bindings/formats.
-        glVertexAttribFormat(el_index, comp_count, comp_type, el.is_normalized,
-                             el.offset_words * 4);
-        glVertexArrayVertexBuffer(vao_, el_index, 0, 0, desc.stride_words * 4);
-      } else {
-        glVertexArrayAttribBinding(vao_, el_index, buffer_index);
-        glVertexArrayAttribFormat(vao_, el_index, comp_count, comp_type,
-                                  el.is_normalized, el.offset_words * 4);
-      }
+      glEnableVertexArrayAttrib(vao_, attrib.attrib_index);
+      glVertexArrayAttribBinding(vao_, attrib.attrib_index,
+                                 vertex_binding.binding_index);
+      glVertexArrayAttribFormat(vao_, attrib.attrib_index, comp_count,
+                                comp_type,
+                                !attrib.fetch_instr.attributes.is_integer,
+                                attrib.fetch_instr.attributes.offset * 4);
     }
   }
 
-  if (has_bindless_vbos) {
-    glBindVertexArray(0);
-  }
-
   return true;
 }
 
-bool GL4Shader::PrepareVertexShader(
-    GL4ShaderTranslator* shader_translator,
-    const xenos::xe_gpu_program_cntl_t& program_cntl) {
-  if (has_prepared_) {
-    return is_valid_;
-  }
-  has_prepared_ = true;
-
-  // Build static vertex array descriptor.
-  if (!PrepareVertexArrayObject()) {
-    XELOGE("Unable to prepare vertex shader array object");
-    return false;
-  }
-  std::string apply_transform =
-      "vec4 applyTransform(const in StateData state, vec4 pos) {\n"
-      "  if (state.vtx_fmt.w == 0.0) {\n"
-      "    // w is 1/W0, so fix it.\n"
-      "    pos.w = 1.0 / pos.w;\n"
-      "  }\n"
-      "  if (state.vtx_fmt.x != 0.0) {\n"
-      "    // Already multiplied by 1/W0, so pull it out.\n"
-      "    pos.xy /= pos.w;\n"
-      "  }\n"
-      "  if (state.vtx_fmt.z != 0.0) {\n"
-      "    // Already multiplied by 1/W0, so pull it out.\n"
-      "    pos.z /= pos.w;\n"
-      "  }\n"
-      "  pos.xy *= state.window_scale.xy;\n"
-      "  return pos;\n"
-      "}\n";
-  std::string source =
-      GetHeader() + apply_transform +
-      "out gl_PerVertex {\n"
-      "  vec4 gl_Position;\n"
-      "  float gl_PointSize;\n"
-      "  float gl_ClipDistance[];\n"
-      "};\n"
-      "layout(location = 0) flat out uint draw_id;\n"
-      "layout(location = 1) out VertexData vtx;\n"
-      "void processVertex(const in StateData state);\n"
-      "void main() {\n" +
-      (alloc_counts().positions ? "  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n"
-                                : "") +
-      (alloc_counts().point_size ? "  gl_PointSize = 1.0;\n" : "") +
-      "  for (int i = 0; i < vtx.o.length(); ++i) {\n"
-      "    vtx.o[i] = vec4(0.0, 0.0, 0.0, 0.0);\n"
-      "  }\n"
-      "  const StateData state = states[gl_DrawIDARB];\n"
-      "  processVertex(state);\n"
-      "  gl_Position = applyTransform(state, gl_Position);\n"
-      "  draw_id = gl_DrawIDARB;\n"
-      "}\n" +
-      GetFooter();
-
-  std::string translated_source =
-      shader_translator->TranslateVertexShader(this, program_cntl);
-  if (translated_source.empty()) {
-    XELOGE("Vertex shader failed translation");
-    return false;
-  }
-  source += translated_source;
-
-  if (!CompileProgram(source)) {
-    return false;
-  }
-
-  is_valid_ = true;
-  return true;
-}
-
-bool GL4Shader::PreparePixelShader(
-    GL4ShaderTranslator* shader_translator,
-    const xenos::xe_gpu_program_cntl_t& program_cntl) {
-  if (has_prepared_) {
-    return is_valid_;
-  }
-  has_prepared_ = true;
-
-  std::string source =
-      GetHeader() +
-      "layout(origin_upper_left, pixel_center_integer) in vec4 gl_FragCoord;\n"
-      "layout(location = 0) flat in uint draw_id;\n"
-      "layout(location = 1) in VertexData vtx;\n"
-      "layout(location = 0) out vec4 oC[4];\n"
-      "void processFragment(const in StateData state);\n"
-      "void applyAlphaTest(int alpha_func, float alpha_ref) {\n"
-      "  bool passes = false;\n"
-      "  switch (alpha_func) {\n"
-      "  case 0:                                          break;\n"
-      "  case 1: if (oC[0].a <  alpha_ref) passes = true; break;\n"
-      "  case 2: if (oC[0].a == alpha_ref) passes = true; break;\n"
-      "  case 3: if (oC[0].a <= alpha_ref) passes = true; break;\n"
-      "  case 4: if (oC[0].a >  alpha_ref) passes = true; break;\n"
-      "  case 5: if (oC[0].a != alpha_ref) passes = true; break;\n"
-      "  case 6: if (oC[0].a >= alpha_ref) passes = true; break;\n"
-      "  case 7:                           passes = true; break;\n"
-      "  };\n"
-      "  if (!passes) discard;\n"
-      "}\n"
-      "void main() {\n" +
-      "  const StateData state = states[draw_id];\n"
-      "  processFragment(state);\n"
-      "  if (state.alpha_test.x != 0.0) {\n"
-      "    applyAlphaTest(int(state.alpha_test.y), state.alpha_test.z);\n"
-      "  }\n"
-      "}\n" +
-      GetFooter();
-
-  std::string translated_source =
-      shader_translator->TranslatePixelShader(this, program_cntl);
-  if (translated_source.empty()) {
-    XELOGE("Pixel shader failed translation");
-    return false;
-  }
-
-  source += translated_source;
-
-  if (!CompileProgram(source)) {
-    return false;
-  }
-
-  is_valid_ = true;
-  return true;
-}
-
-bool GL4Shader::CompileProgram(std::string source) {
+bool GL4Shader::CompileShader() {
   assert_zero(program_);
 
-  translated_disassembly_ = std::move(source);
-  const char* source_str = translated_disassembly_.c_str();
-
-  // Save to disk, if we asked for it.
-  auto base_path = FLAGS_dump_shaders.c_str();
-  char file_name[xe::max_path];
-  snprintf(file_name, xe::countof(file_name), "%s/gl4_gen_%.16llX.%s",
-           base_path, data_hash_,
-           shader_type_ == ShaderType::kVertex ? "vert" : "frag");
-  if (!FLAGS_dump_shaders.empty()) {
-    // Ensure shader dump path exists.
-    auto dump_shaders_path = xe::to_wstring(FLAGS_dump_shaders);
-    if (!dump_shaders_path.empty()) {
-      dump_shaders_path = xe::to_absolute_path(dump_shaders_path);
-      xe::fs::CreateFolder(dump_shaders_path);
-    }
-
-    // Note that we put the translated source first so we get good line numbers.
-    FILE* f = fopen(file_name, "w");
-    fprintf(f, translated_disassembly_.c_str());
-    fprintf(f, "\n\n");
-    fprintf(f, "/*\n");
-    fprintf(f, ucode_disassembly_.c_str());
-    fprintf(f, " */\n");
-    fclose(f);
-  }
-
-  program_ = glCreateShaderProgramv(shader_type_ == ShaderType::kVertex
-                                        ? GL_VERTEX_SHADER
-                                        : GL_FRAGMENT_SHADER,
-                                    1, &source_str);
-  if (!program_) {
-    XELOGE("Unable to create shader program");
+  shader_ =
+      glCreateShader(shader_type_ == ShaderType::kVertex ? GL_VERTEX_SHADER
+                                                         : GL_FRAGMENT_SHADER);
+  if (!shader_) {
+    XELOGE("OpenGL could not create a shader object!");
     return false;
   }
 
-  // Get error log, if we failed to link.
+  auto source_str = GetTranslatedBinaryString();
+  auto source_str_ptr = source_str.c_str();
+  GLint source_length = GLint(source_str.length());
+  glShaderSource(shader_, 1, &source_str_ptr, &source_length);
+  glCompileShader(shader_);
+
+  GLint status = 0;
+  glGetShaderiv(shader_, GL_COMPILE_STATUS, &status);
+
+  return status == GL_TRUE;
+}
+
+bool GL4Shader::LinkProgram() {
+  program_ = glCreateProgram();
+  if (!program_) {
+    XELOGE("OpenGL could not create a shader program!");
+    return false;
+  }
+
+  glAttachShader(program_, shader_);
+
+  // Enable TFB
+  if (shader_type_ == ShaderType::kVertex) {
+    const GLchar* feedbackVaryings = "gl_Position";
+    glTransformFeedbackVaryings(program_, 1, &feedbackVaryings,
+                                GL_SEPARATE_ATTRIBS);
+  }
+
+  glProgramParameteri(program_, GL_PROGRAM_SEPARABLE, GL_TRUE);
+  glLinkProgram(program_);
+
   GLint link_status = 0;
   glGetProgramiv(program_, GL_LINK_STATUS, &link_status);
   if (!link_status) {
-    // log_length includes the null character.
-    GLint log_length = 0;
-    glGetProgramiv(program_, GL_INFO_LOG_LENGTH, &log_length);
-    std::string info_log;
-    info_log.resize(log_length - 1);
-    glGetProgramInfoLog(program_, log_length, &log_length,
-                        const_cast<char*>(info_log.data()));
-    XELOGE("Unable to link program: %s", info_log.c_str());
-    error_log_ = std::move(info_log);
     assert_always("Unable to link generated shader");
     return false;
   }
+
+  return true;
+}
+
+std::string GL4Shader::GetShaderInfoLog() {
+  if (!shader_) {
+    return "GL4Shader::GetShaderInfoLog(): Program is NULL";
+  }
+
+  std::string log;
+  GLint log_length = 0;
+  glGetShaderiv(shader_, GL_INFO_LOG_LENGTH, &log_length);
+  if (log_length > 0) {
+    log.resize(log_length - 1);
+    glGetShaderInfoLog(shader_, log_length, &log_length, &log[0]);
+  }
+
+  return log;
+}
+
+std::string GL4Shader::GetProgramInfoLog() {
+  if (!program_) {
+    return "GL4Shader::GetProgramInfoLog(): Program is NULL";
+  }
+
+  std::string log;
+  GLint log_length = 0;
+  glGetProgramiv(program_, GL_INFO_LOG_LENGTH, &log_length);
+  if (log_length > 0) {
+    log.resize(log_length - 1);
+    glGetProgramInfoLog(program_, log_length, &log_length, &log[0]);
+  }
+
+  return log;
+}
+
+std::vector<uint8_t> GL4Shader::GetBinary(GLenum* binary_format) {
+  std::vector<uint8_t> binary;
 
   // Get program binary, if it's available.
   GLint binary_length = 0;
   glGetProgramiv(program_, GL_PROGRAM_BINARY_LENGTH, &binary_length);
   if (binary_length) {
-    translated_binary_.resize(binary_length);
-    GLenum binary_format;
-    glGetProgramBinary(program_, binary_length, &binary_length, &binary_format,
-                       translated_binary_.data());
+    binary.resize(binary_length);
+    GLenum binary_format_tmp = 0;
+    glGetProgramBinary(program_, binary_length, &binary_length,
+                       &binary_format_tmp, binary.data());
 
-    // If we are on nvidia, we can find the disassembly string.
-    // I haven't been able to figure out from the format how to do this
-    // without a search like this.
-    const char* disasm_start = nullptr;
-    size_t search_offset = 0;
-    char* search_start = reinterpret_cast<char*>(translated_binary_.data());
-    while (true) {
-      auto p = reinterpret_cast<char*>(
-          memchr(translated_binary_.data() + search_offset, '!',
-                 translated_binary_.size() - search_offset));
-      if (!p) {
-        break;
-      }
-      if (p[0] == '!' && p[1] == '!' && p[2] == 'N' && p[3] == 'V') {
-        disasm_start = p;
-        break;
-      }
-      search_offset = p - search_start;
-      ++search_offset;
-    }
-    if (disasm_start) {
-      host_disassembly_ = std::string(disasm_start);
-    } else {
-      host_disassembly_ = std::string("Shader disassembly not available.");
-    }
-
-    // Append to shader dump.
-    if (!FLAGS_dump_shaders.empty()) {
-      if (disasm_start) {
-        FILE* f = fopen(file_name, "a");
-        fprintf(f, "\n\n/*\n");
-        fprintf(f, disasm_start);
-        fprintf(f, "\n*/\n");
-        fclose(f);
-      } else {
-        XELOGW("Got program binary but unable to find disassembly");
-      }
+    if (binary_format) {
+      *binary_format = binary_format_tmp;
     }
   }
 
-  return true;
+  return binary;
+}
+
+std::string GL4Shader::GetHostDisasmNV(const std::vector<uint8_t>& binary) {
+  // If we are on nvidia, we can find the disassembly string.
+  // I haven't been able to figure out from the format how to do this
+  // without a search like this.
+  std::string disasm;
+
+  const char* disasm_start = nullptr;
+  size_t search_offset = 0;
+  const char* search_start = reinterpret_cast<const char*>(binary.data());
+  while (true) {
+    auto p = reinterpret_cast<const char*>(memchr(
+        binary.data() + search_offset, '!', binary.size() - search_offset));
+    if (!p) {
+      break;
+    }
+    if (p[0] == '!' && p[1] == '!' && p[2] == 'N' && p[3] == 'V') {
+      disasm_start = p;
+      break;
+    }
+    search_offset = p - search_start;
+    ++search_offset;
+  }
+  if (disasm_start) {
+    disasm = std::string(disasm_start);
+  } else {
+    disasm = std::string("Shader disassembly not available.");
+  }
+
+  return disasm;
 }
 
 }  // namespace gl4
